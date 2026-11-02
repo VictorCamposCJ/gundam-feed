@@ -25,6 +25,7 @@ GRADES = [("PG", r"\bPG\b|perfect grade"), ("MG", r"\bMG\b|master grade"), ("RG"
           ("EG", r"\bEG\b|entry grade"), ("Figura", r"figure|figura|gff|gundam fix")]
 UA = {"User-Agent": "Mozilla/5.0 (compatible; GundamFeedBot/1.0; uso personal)"}
 DATA = Path("data"); DATA.mkdir(exist_ok=True)
+BASELINE = "2000-01-01T00:00:00+00:00"  # fecha de los productos ya existentes al empezar a seguir una tienda
 
 def grade(title):
     for g, rx in GRADES:
@@ -111,8 +112,8 @@ def parse_generic(soup, s):
             m = PRICE.search(txt)
             if m:
                 links = [x for x in node.select("a[href]") if len(x.get_text(strip=True)) > 8]
-                title = (links[0].get_text(" ", strip=True) if links else "") or a.get("title") or img.get("alt") or ""
-                href_a = links[0] if links else a
+                href_a = max(links, key=lambda x: len(x.get_text(strip=True))) if links else a
+                title = (href_a.get_text(" ", strip=True) if links else "") or a.get("title") or img.get("alt") or ""
                 p = make(s, href_a, title, m.group(), txt, img)
                 if title and p["id"] not in seen: seen.add(p["id"]); out.append(p)
                 break
@@ -188,7 +189,7 @@ def main():
         ids = set()
         for p in items:
             ids.add(p["id"]); old = prev.get(p["id"])
-            p["first_seen"] = old["first_seen"] if old else now
+            p["first_seen"] = old["first_seen"] if old else (now if s["name"] in known_stores else BASELINE)
             current[p["id"]] = p
             if s["name"] in known_stores:  # primera ejecución de una tienda: no avisar
                 if not old: new.append(p)
