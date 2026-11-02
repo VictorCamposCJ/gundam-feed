@@ -63,60 +63,102 @@ def scrape_shopify(s):
 CARD_SELECTORS = ["article.product-miniature", "li.product", ".product-miniature", ".ajax_block_product",
                   ".product-item", ".product-card", ".product-thumb", "div.product"]
 SOLD = re.compile(r"agotado|sin stock|out of stock|no disponible|sold out", re.I)
+PRICE = re.compile(r"\d{1,3}(?:\.\d{3})*,\d{2}\s*€|€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€")
+BAD = re.compile(r"card|carta|tcg|trading", re.I)
+SEARCH_PATHS = ["/buscar?controller=search&s=gundam", "/search?controller=search&s=gundam",
+                "/search?q=gundam", "/?s=gundam&post_type=product", "/busqueda?controller=search&s=gundam"]
 
-def find_gundam_url(s):
-    soup = BeautifulSoup(get(s["base"]).text, "html.parser")
-    best = None
-    for a in soup.select("a[href]"):
-        label, href = a.get_text(" ", strip=True), a["href"]
-        if re.search(r"gundam|gunpla", f"{label} {href}", re.I) and not re.search(r"\d{4,}-.*\.html$|/products?/", href):
-            url = requests.compat.urljoin(s["base"], href)
-            if best is None or len(url) < len(best): best = url
-    if not best: raise RuntimeError("no encontré enlace a Gundam/Gunpla en la portada")
-    print(f"AUTO url {s['name']}: {best}")
-    return best
+def to_price(raw):
+    m = re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}|\d+(?:[.,]\d+)?", raw or "")
+    if not m: return 0.0
+    t = m.group()
+    t = t.replace(".", "").replace(",", ".") if "," in t else t
+    return float(t)
+
+def make(s, a, title, price_txt, text, img, extra_cls=""):
+    url = requests.compat.urljoin(s["base"], a["href"])
+    src = ""
+    if img: src = img.get("data-src") or img.get("data-lazy-src") or img.get("src") or ""
+    return {"id": f"{s['name']}:{url}", "store": s["name"], "title": title, "price": to_price(price_txt),
+            "in_stock": not SOLD.search(text) and "outofstock" not in extra_cls,
+            "image": requests.compat.urljoin(s["base"], src) if src and not src.startswith("data:") else "", "url": url}
 
 def parse_cards(soup, s):
     for sel in CARD_SELECTORS:
-        cards = soup.select(sel)
-        if cards: break
-    else:
-        return [], None
-    out = []
-    for c in cards:
-        a = c.select_one(".product-title a, h2 a, h3 a, a.product-name") or c.select_one("a[href]")
-        if not a or not a.get("href"): continue
-        img = c.select_one("img")
-        t = c.select_one(".product-title, .woocommerce-loop-product__title, h2, h3, a.product-name")
-        title = (t.get_text(" ", strip=True) if t else "") or a.get_text(" ", strip=True) or a.get("title") or (img.get("alt") if img else "")
-        if not title: continue
-        pr = c.select_one("[itemprop=price], .price ins .amount, .price .amount, .price, .product-price")
-        raw = (pr.get("content") or pr.get_text(" ")) if pr else ""
-        m = re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}|\d+(?:\.\d+)?", raw)
-        price = float(m.group().replace(".", "").replace(",", ".")) if m and "," in m.group() else (float(m.group()) if m else 0.0)
-        src = ""
-        if img: src = img.get("data-src") or img.get("data-lazy-src") or img.get("src") or ""
-        url = requests.compat.urljoin(s["base"], a["href"])
-        out.append({"id": f"{s['name']}:{url}", "store": s["name"], "title": title, "price": price,
-                    "in_stock": not SOLD.search(c.get_text(" ", strip=True)) and "outofstock" not in " ".join(c.get("class", [])),
-                    "image": requests.compat.urljoin(s["base"], src) if src else "", "url": url})
-    return out, sel
+        out = []
+        for c in soup.select(sel):
+            a = c.select_one(".product-title a, h2 a, h3 a, a.product-name") or c.select_one("a[href]")
+            if not a or not a.get("href"): continue
+            img = c.select_one("img")
+            t = c.select_one(".product-title, .woocommerce-loop-product__title, h2, h3, a.product-name")
+            title = (t.get_text(" ", strip=True) if t else "") or a.get_text(" ", strip=True) or a.get("title") or (img.get("alt") if img else "")
+            if not title: continue
+            pr = c.select_one("[itemprop=price], .price ins .amount, .price .amount, .price, .product-price")
+            raw = (pr.get("content") or pr.get_text(" ")) if pr else ""
+            out.append(make(s, a, title, raw, c.get_text(" ", strip=True), img, " ".join(c.get("class", []))))
+        if out: return out, sel
+    return parse_generic(soup, s), "generic"
 
-def scrape_html(s):
-    url = s.get("url") or find_gundam_url(s)
+def parse_generic(soup, s):
+    """Plan B: bloque más pequeño con enlace+imagen y un precio en €, sea cual sea el diseño."""
+    out, seen = [], set()
+    for img in soup.select("a[href] img"):
+        a = img.find_parent("a"); node = a
+        for _ in range(6):
+            node = node.parent
+            if node is None or node.name in ("body", "html"): break
+            hrefs = {x["href"] for x in node.select("a[href]") if x.select_one("img")}
+            if len(hrefs) > 1: break
+            txt = node.get_text(" ", strip=True)
+            m = PRICE.search(txt)
+            if m:
+                links = [x for x in node.select("a[href]") if len(x.get_text(strip=True)) > 8]
+                title = (links[0].get_text(" ", strip=True) if links else "") or a.get("title") or img.get("alt") or ""
+                href_a = links[0] if links else a
+                p = make(s, href_a, title, m.group(), txt, img)
+                if title and p["id"] not in seen: seen.add(p["id"]); out.append(p)
+                break
+    return out
+
+def gundam_candidates(s):
+    soup = BeautifulSoup(get(s["base"]).text, "html.parser"); found = set()
+    for a in soup.select("a[href]"):
+        href = a["href"]; blob = f"{a.get_text(' ', strip=True)} {href}"
+        if not re.search(r"gundam|gunpla", blob, re.I) or BAD.search(blob): continue
+        if re.search(r"\d{4,}-.*\.html$|/products?/|/producto/", href): continue
+        url = requests.compat.urljoin(s["base"], href)
+        found.add((0 if re.search(r"maqueta|model|gunpla|kit", blob, re.I) else 1, len(url), url))
+    return [u for _, _, u in sorted(found)][:4]
+
+def crawl(s, url):
     out, seen = [], set()
     for page in range(15):
-        soup = BeautifulSoup(get(url).text, "html.parser")
+        r = get(url); soup = BeautifulSoup(r.text, "html.parser")
         items, sel = parse_cards(soup, s)
         fresh = [p for p in items if p["id"] not in seen]
         if page == 0 and not items:
-            print(f"   {s['name']}: sin tarjetas en {url} · título de página: {soup.title.string.strip() if soup.title and soup.title.string else '?'}")
+            print(f"   {s['name']}: sin productos en {url} · título: {soup.title.string.strip() if soup.title and soup.title.string else '?'}"
+                  f" · '€' en HTML: {r.text.count('€')} · ld+json: {'ld+json' in r.text} · bytes: {len(r.text)}")
         if not fresh: break
         seen.update(p["id"] for p in fresh); out += fresh
         nxt = soup.select_one("a[rel=next], link[rel=next], a.next, li.next a")
         if not nxt or not nxt.get("href"): break
         url = requests.compat.urljoin(url, nxt["href"])
     return out
+
+def scrape_html(s):
+    if s.get("url"): cands = [(s["url"], False)]
+    else:
+        cands = []
+        try: cands = [(u, False) for u in gundam_candidates(s)]
+        except requests.RequestException as e: print(f"   {s['name']}: portada no disponible ({e})")
+        cands += [(s["base"] + p, True) for p in SEARCH_PATHS]
+    for url, is_search in cands:
+        try: items = crawl(s, url)
+        except requests.RequestException: continue
+        if is_search: items = [p for p in items if KEYWORDS.search(p["title"])]
+        if items: print(f"AUTO url {s['name']}: {url}"); return items
+    return []
 
 def telegram(text):
     tok, chat = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
