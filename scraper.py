@@ -10,15 +10,13 @@ from bs4 import BeautifulSoup
 # type: "shopify" (usa /products.json) o "prestashop" (HTML, selectores habituales).
 # Si una tienda falla, el log lo dice y se conservan sus datos anteriores.
 STORES = [
-    {"name": "Robotines",    "base": "https://www.robotines.com",    "type": "html", "url": "https://www.robotines.com/es/35-maquetas-gundam"},
-    {"name": "Lost Bunker",  "base": "https://lostbunker.com",       "type": "shopify"},
-    {"name": "La Escotilla", "base": "https://laescotillajuegos.com","type": "shopify"},
-    # Sin URL: el scraper busca solo el enlace "Gundam/Gunpla" de la portada y lo imprime en el log.
-    # Cuando veas "AUTO url" correcta, copia esa URL aquí en "url" para fijarla.
-    {"name": "Gold Saucer",  "base": "https://goldsaucerstore.es",   "type": "html"},
-    {"name": "Impact Store", "base": "https://impactstore.es",       "type": "html"},
-    {"name": "Kurogami",     "base": "https://kurogami.com",         "type": "html"},
-    {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",   "type": "html"},
+    {"name": "Robotines",    "base": "https://www.robotines.com",     "type": "html", "url": "https://www.robotines.com/es/35-maquetas-gundam"},
+    {"name": "Lost Bunker",  "base": "https://lostbunker.com",        "type": "shopify"},
+    {"name": "La Escotilla", "base": "https://laescotillajuegos.com", "type": "shopify"},
+    {"name": "Gold Saucer",  "base": "https://goldsaucerstore.es",    "type": "html", "url": "https://goldsaucerstore.es/60-model-kits-gundam"},
+    {"name": "Impact Store", "base": "https://impactstore.es",        "type": "html", "url": "https://impactstore.es/?s=gundam&post_type=product"},
+    {"name": "Kurogami",     "base": "https://kurogami.com",          "type": "html", "url": "https://kurogami.com/buscar?controller=search&s=gundam"},
+    {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",    "type": "html", "url": "https://www.1001hobbies.es/26736-gunpla"},
 ]
 
 KEYWORDS = re.compile(r"gundam|gunpla|bandai|\b(hg|rg|mg|pg|sd|eg)\b|model kit|maqueta", re.I)
