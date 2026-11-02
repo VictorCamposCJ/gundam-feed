@@ -10,13 +10,15 @@ from bs4 import BeautifulSoup
 # type: "shopify" (usa /products.json) o "prestashop" (HTML, selectores habituales).
 # Si una tienda falla, el log lo dice y se conservan sus datos anteriores.
 STORES = [
-    {"name": "Robotines",       "base": "https://www.robotines.com",   "type": "prestashop", "url": "https://www.robotines.com/gundam"},
-    {"name": "Lost Bunker",     "base": "https://lostbunker.com",      "type": "shopify"},
-    {"name": "Gold Saucer",     "base": "https://goldsaucerstore.es",  "type": "shopify"},
-    {"name": "Impact Store",    "base": "https://impactstore.es",      "type": "shopify"},
-    {"name": "Kurogami",        "base": "https://kurogami.com",        "type": "prestashop", "url": "https://kurogami.com/gundam"},
-    {"name": "La Escotilla",    "base": "https://laescotillajuegos.com","type": "shopify"},
-    {"name": "1001Hobbies",     "base": "https://www.1001hobbies.es",  "type": "prestashop", "url": "https://www.1001hobbies.es/gunpla.html"},
+    {"name": "Robotines",    "base": "https://www.robotines.com",    "type": "html", "url": "https://www.robotines.com/es/35-maquetas-gundam"},
+    {"name": "Lost Bunker",  "base": "https://lostbunker.com",       "type": "shopify"},
+    {"name": "La Escotilla", "base": "https://laescotillajuegos.com","type": "shopify"},
+    # Sin URL: el scraper busca solo el enlace "Gundam/Gunpla" de la portada y lo imprime en el log.
+    # Cuando veas "AUTO url" correcta, copia esa URL aquí en "url" para fijarla.
+    {"name": "Gold Saucer",  "base": "https://goldsaucerstore.es",   "type": "html"},
+    {"name": "Impact Store", "base": "https://impactstore.es",       "type": "html"},
+    {"name": "Kurogami",     "base": "https://kurogami.com",         "type": "html"},
+    {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",   "type": "html"},
 ]
 
 KEYWORDS = re.compile(r"gundam|gunpla|bandai|\b(hg|rg|mg|pg|sd|eg)\b|model kit|maqueta", re.I)
@@ -32,8 +34,15 @@ def grade(title):
     return "Otro"
 
 def get(url, **kw):
-    time.sleep(1.5)  # trato amable con las tiendas
-    r = requests.get(url, headers=UA, timeout=25, **kw); r.raise_for_status(); return r
+    last = None
+    for i in range(3):
+        time.sleep(1.5)
+        try:
+            r = requests.get(url, headers=UA, timeout=40, **kw); r.raise_for_status(); return r
+        except requests.RequestException as e:
+            last = e
+            if getattr(getattr(e, "response", None), "status_code", 0) in (403, 404): break
+    raise last
 
 def scrape_shopify(s):
     out = []
@@ -51,29 +60,62 @@ def scrape_shopify(s):
                         "url": f"{s['base']}/products/{p['handle']}"})
     return out
 
-def scrape_prestashop(s):
+CARD_SELECTORS = ["article.product-miniature", "li.product", ".product-miniature", ".ajax_block_product",
+                  ".product-item", ".product-card", ".product-thumb", "div.product"]
+SOLD = re.compile(r"agotado|sin stock|out of stock|no disponible|sold out", re.I)
+
+def find_gundam_url(s):
+    soup = BeautifulSoup(get(s["base"]).text, "html.parser")
+    best = None
+    for a in soup.select("a[href]"):
+        label, href = a.get_text(" ", strip=True), a["href"]
+        if re.search(r"gundam|gunpla", f"{label} {href}", re.I) and not re.search(r"\d{4,}-.*\.html$|/products?/", href):
+            url = requests.compat.urljoin(s["base"], href)
+            if best is None or len(url) < len(best): best = url
+    if not best: raise RuntimeError("no encontré enlace a Gundam/Gunpla en la portada")
+    print(f"AUTO url {s['name']}: {best}")
+    return best
+
+def parse_cards(soup, s):
+    for sel in CARD_SELECTORS:
+        cards = soup.select(sel)
+        if cards: break
+    else:
+        return [], None
+    out = []
+    for c in cards:
+        a = c.select_one(".product-title a, h2 a, h3 a, a.product-name") or c.select_one("a[href]")
+        if not a or not a.get("href"): continue
+        img = c.select_one("img")
+        t = c.select_one(".product-title, .woocommerce-loop-product__title, h2, h3, a.product-name")
+        title = (t.get_text(" ", strip=True) if t else "") or a.get_text(" ", strip=True) or a.get("title") or (img.get("alt") if img else "")
+        if not title: continue
+        pr = c.select_one("[itemprop=price], .price ins .amount, .price .amount, .price, .product-price")
+        raw = (pr.get("content") or pr.get_text(" ")) if pr else ""
+        m = re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}|\d+(?:\.\d+)?", raw)
+        price = float(m.group().replace(".", "").replace(",", ".")) if m and "," in m.group() else (float(m.group()) if m else 0.0)
+        src = ""
+        if img: src = img.get("data-src") or img.get("data-lazy-src") or img.get("src") or ""
+        url = requests.compat.urljoin(s["base"], a["href"])
+        out.append({"id": f"{s['name']}:{url}", "store": s["name"], "title": title, "price": price,
+                    "in_stock": not SOLD.search(c.get_text(" ", strip=True)) and "outofstock" not in " ".join(c.get("class", [])),
+                    "image": requests.compat.urljoin(s["base"], src) if src else "", "url": url})
+    return out, sel
+
+def scrape_html(s):
+    url = s.get("url") or find_gundam_url(s)
     out, seen = [], set()
-    for page in range(1, 11):
-        sep = "&" if "?" in s["url"] else "?"
-        soup = BeautifulSoup(get(f"{s['url']}{sep}page={page}").text, "html.parser")
-        cards = soup.select("article.product-miniature, .product-miniature, li.product, .product_list .ajax_block_product")
-        new = 0
-        for c in cards:
-            a = c.select_one(".product-title a, h2 a, h3 a, a.product-name")
-            if not a or not a.get("href"): continue
-            url = requests.compat.urljoin(s["base"], a["href"])
-            if url in seen: continue
-            seen.add(url); new += 1
-            pr = c.select_one(".price, .product-price, [itemprop=price]")
-            m = re.search(r"[\d.]+,\d{2}|\d+(?:\.\d+)?", (pr.get("content") or pr.get_text()) if pr else "")
-            price = float(m.group().replace(".", "").replace(",", ".")) if m else 0.0
-            img = c.select_one("img")
-            src = (img.get("data-src") or img.get("src") or "") if img else ""
-            txt = c.get_text(" ", strip=True).lower()
-            sold = bool(re.search(r"agotado|sin stock|out of stock", txt))
-            out.append({"id": f"{s['name']}:{url}", "store": s["name"], "title": a.get_text(strip=True),
-                        "price": price, "in_stock": not sold, "image": src, "url": url})
-        if not new: break
+    for page in range(15):
+        soup = BeautifulSoup(get(url).text, "html.parser")
+        items, sel = parse_cards(soup, s)
+        fresh = [p for p in items if p["id"] not in seen]
+        if page == 0 and not items:
+            print(f"   {s['name']}: sin tarjetas en {url} · título de página: {soup.title.string.strip() if soup.title and soup.title.string else '?'}")
+        if not fresh: break
+        seen.update(p["id"] for p in fresh); out += fresh
+        nxt = soup.select_one("a[rel=next], link[rel=next], a.next, li.next a")
+        if not nxt or not nxt.get("href"): break
+        url = requests.compat.urljoin(url, nxt["href"])
     return out
 
 def telegram(text):
@@ -97,7 +139,7 @@ def main():
 
     for s in STORES:
         try:
-            items = scrape_shopify(s) if s["type"] == "shopify" else scrape_prestashop(s)
+            items = scrape_shopify(s) if s["type"] == "shopify" else scrape_html(s)
             if not items: raise RuntimeError("0 productos (¿cambió la web o el selector?)")
             print(f"OK  {s['name']}: {len(items)}")
         except Exception as e:
