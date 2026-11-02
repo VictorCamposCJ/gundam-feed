@@ -20,7 +20,17 @@ STORES = [
 ]
 
 KEYWORDS = re.compile(r"gundam|gunpla|bandai|\b(hg|rg|mg|pg|sd|eg)\b|model kit|maqueta", re.I)
-GRADES = [("PG", r"\bPG\b|perfect grade"), ("MG", r"\bMG\b|master grade"), ("RG", r"\bRG\b|real grade"),
+ACCESORIO = (r"\bGD\s?-?\d{2,3}\b|decals?\b|calcas?\b|pegatinas?|stickers?|marcador|marker|rotulador|pintura|\bpaint\b|spray|barniz|"
+             r"imprimaci|cutter|nipper|alicate|herramienta|\btools?\b|pincel|aer[oó]grafo|peana|expositor|display stand|action base|"
+             r"stand set|builders? parts|option parts|option set|weapons? (set|unit|pack)|gundam colou?r|\blibro\b|\bbook\b|revista|magazine")
+NON_GUNDAM = re.compile(r"\b30 ?M[FSM]\b|armored core|frame arms|megami|zoids|\brosan\b|\bkotobukiya\b", re.I)
+
+def keep(p):
+    """Descarta líneas de Bandai/otras marcas que no son Gundam (salvo que el título diga Gundam/Gunpla)."""
+    t = p["title"]
+    return not (NON_GUNDAM.search(t) and not re.search(r"gundam|gunpla", t, re.I))
+
+GRADES = [("Accesorio", ACCESORIO), ("PG", r"\bPG\b|perfect grade"), ("MG", r"\bMG\b|master grade"), ("RG", r"\bRG\b|real grade"),
           ("HG", r"\bHG\w*\b|high grade"), ("SD", r"\bSD\b|\bSDCS\b|super deformed"),
           ("EG", r"\bEG\b|entry grade"), ("Figura", r"figure|figura|gff|gundam fix")]
 UA = {"User-Agent": "Mozilla/5.0 (compatible; GundamFeedBot/1.0; uso personal)"}
@@ -139,6 +149,7 @@ def crawl(s, url):
             print(f"   {s['name']}: sin productos en {url} · título: {soup.title.string.strip() if soup.title and soup.title.string else '?'}"
                   f" · '€' en HTML: {r.text.count('€')} · ld+json: {'ld+json' in r.text} · bytes: {len(r.text)}")
         if not fresh: break
+        print(f"   {s['name']}: página {page + 1} -> {len(fresh)} productos nuevos") if os.getenv("DEBUG_PAGES") else None
         seen.update(p["id"] for p in fresh); out += fresh
         nxt = soup.select_one("a[rel=next], link[rel=next], a.next, li.next a")
         if not nxt or not nxt.get("href"): break
@@ -173,7 +184,9 @@ def line(p):
 def main():
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     f = DATA / "productos.json"
-    prev = {p["id"]: p for p in json.loads(f.read_text())["products"]} if f.exists() else {}
+    old_data = json.loads(f.read_text()) if f.exists() else {}
+    prev = {p["id"]: p for p in old_data.get("products", [])}
+    counts = dict(old_data.get("counts", {}))
     known_stores = {p["store"] for p in prev.values()}
     current, new, restock, errors = {}, [], [], []
     watch = [w.strip().lower() for w in os.getenv("WATCH", "").split(",") if w.strip()]
@@ -181,11 +194,15 @@ def main():
     for s in STORES:
         try:
             items = scrape_shopify(s) if s["type"] == "shopify" else scrape_html(s)
+            items = [p for p in items if keep(p)]
+            n0 = counts.get(s["name"], 0)
+            if n0 >= 20 and len(items) < 0.7 * n0:
+                raise RuntimeError(f"solo {len(items)} productos frente a {n0} la vez anterior: lectura incompleta, se conservan los datos anteriores")
             if not items: raise RuntimeError("0 productos (¿cambió la web o el selector?)")
-            print(f"OK  {s['name']}: {len(items)}")
+            print(f"OK  {s['name']}: {len(items)}"); counts[s["name"]] = len(items)
         except Exception as e:
             print(f"ERR {s['name']}: {e}", file=sys.stderr); errors.append(s["name"])
-            current.update({k: v for k, v in prev.items() if v["store"] == s["name"]}); continue
+            current.update({k: v for k, v in prev.items() if v["store"] == s["name"] and keep(v)}); continue
         ids = set()
         for p in items:
             ids.add(p["id"]); old = prev.get(p["id"])
@@ -196,12 +213,12 @@ def main():
                 elif p["in_stock"] and not old["in_stock"]:
                     if not watch or any(w in p["title"].lower() for w in watch): restock.append(p)
         for k, v in prev.items():  # desaparecidos = sin stock
-            if v["store"] == s["name"] and k not in ids:
+            if v["store"] == s["name"] and k not in ids and keep(v):
                 current[k] = {**v, "in_stock": False}
 
     prods = sorted(current.values(), key=lambda p: p["first_seen"], reverse=True)
     for p in prods: p["grade"] = grade(p["title"])
-    f.write_text(json.dumps({"updated": now, "errors": errors, "products": prods}, ensure_ascii=False))
+    f.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "products": prods}, ensure_ascii=False))
 
     items = "".join(f"<item><title>{escape(p['title'])} ({p['price']:.2f} €, {escape(p['store'])})</title>"
                     f"<link>{escape(p['url'])}</link><guid>{escape(p['id'])}</guid>"
@@ -211,8 +228,10 @@ def main():
         f"<title>Novedades Gunpla España</title><link>.</link><description>Novedades de tiendas</description>{items}</channel></rss>")
 
     msg = ""
-    if new: msg += f"🆕 <b>Novedades ({len(new)})</b>\n" + "\n".join(map(line, new[:25])) + "\n\n"
-    if restock: msg += f"✅ <b>De nuevo en stock ({len(restock)})</b>\n" + "\n".join(map(line, restock[:25]))
+    if len(new) > 40: msg += f"🆕 {len(new)} novedades de golpe (probable cambio en la lectura de una tienda); no las listo.\n\n"
+    elif new: msg += f"🆕 <b>Novedades ({len(new)})</b>\n" + "\n".join(map(line, new[:25])) + "\n\n"
+    if len(restock) > 40: msg += f"✅ {len(restock)} reposiciones de golpe (probable lectura incompleta antes); no las listo."
+    elif restock: msg += f"✅ <b>De nuevo en stock ({len(restock)})</b>\n" + "\n".join(map(line, restock[:25]))
     if msg: telegram(msg.strip())
 
 if __name__ == "__main__":
