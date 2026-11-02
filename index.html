@@ -53,6 +53,7 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
     <option value="new">Más recientes</option><option value="pa">Precio: menor a mayor</option><option value="pd">Precio: mayor a menor</option>
   </select>
   <label class="chk"><input type="checkbox" id="stock"> Solo con stock</label>
+  <label class="chk"><input type="checkbox" id="noacc" checked> Ocultar accesorios</label>
   <div class="row" id="grades" role="group" aria-label="Gama"></div>
 </div></div>
 <div class="wrap">
@@ -72,7 +73,7 @@ fetch('data/productos.json?'+Date.now()).then(r=>r.json()).then(d=>{
   $('meta').dataset.upd = upd;
   if (d.errors && d.errors.length){ $('warn').style.display='block'; $('warn').textContent='No se han podido actualizar: '+d.errors.join(', ')+'. Se muestran los últimos datos conocidos.'; }
   [...new Set(all.map(p=>p.store))].sort().forEach(s=>$('store').add(new Option(s,s)));
-  ['PG','MG','RG','HG','SD','EG','Figura','Otro'].filter(g=>all.some(p=>p.grade===g)).forEach(g=>{
+  ['PG','MG','RG','HG','SD','EG','Figura','Accesorio','Otro'].filter(g=>all.some(p=>p.grade===g)).forEach(g=>{
     const b=document.createElement('button'); b.className='chip'; b.textContent=g; b.setAttribute('aria-pressed','false');
     b.onclick=()=>{gradeSel.has(g)?gradeSel.delete(g):gradeSel.add(g); b.setAttribute('aria-pressed',gradeSel.has(g)); render();};
     $('grades').append(b);
@@ -80,11 +81,11 @@ fetch('data/productos.json?'+Date.now()).then(r=>r.json()).then(d=>{
   render();
 }).catch(()=>{ $('grid').innerHTML='<p class="empty">No se pudo cargar data/productos.json. Ejecuta el scraper primero.</p>'; });
 
-['q','store','sort','stock'].forEach(id=>$(id).addEventListener('input',render));
+['q','store','sort','stock','noacc'].forEach(id=>$(id).addEventListener('input',render));
 
 function render(){
-  const q=$('q').value.trim().toLowerCase(), st=$('store').value, onlyStock=$('stock').checked;
-  let list=all.filter(p=>(!q||p.title.toLowerCase().includes(q))&&(!st||p.store===st)&&(!onlyStock||p.in_stock)&&(!gradeSel.size||gradeSel.has(p.grade)));
+  const q=$('q').value.trim().toLowerCase(), st=$('store').value, onlyStock=$('stock').checked, noAcc=$('noacc').checked;
+  let list=all.filter(p=>(!q||p.title.toLowerCase().includes(q))&&(!st||p.store===st)&&(!onlyStock||p.in_stock)&&(!gradeSel.size||gradeSel.has(p.grade))&&(!noAcc||gradeSel.has('Accesorio')||p.grade!=='Accesorio'));
   const s=$('sort').value;
   if(s==='pa') list.sort((a,b)=>a.price-b.price); else if(s==='pd') list.sort((a,b)=>b.price-a.price);
   $('meta').textContent=`${list.length} productos · actualizado ${$('meta').dataset.upd}`;
