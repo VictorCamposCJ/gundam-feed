@@ -23,10 +23,10 @@ STORES = [
     {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/buscar?texto=gundam", "rev": 2},
-    {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "rev": 3},
+    {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/busqueda?controller=search&s=gundam", "rev": 2},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411"},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "rev": 2},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "woo", "url": "https://lacuevaroja.com/?mot_q=gundam", "fallback": "https://lacuevaroja.com/gundam-assemble", "rev": 3},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
@@ -281,27 +281,87 @@ def crawl(s, url):
     print(f"   {s['name']}: {pages} página(s) leída(s)" + (" · LÍMITE de 40 alcanzado" if pages >= 40 else ""))
     return out
 
+def ficha_status(page_html):
+    """Estado real a partir de la ficha del producto (Odoo): 'out', 'stock', 'preorder' o None si no se puede saber."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    msg = soup.select_one("#out_of_stock_message")
+    if msg and SOLD.search(msg.get_text(" ", strip=True)): return "out"
+    w = soup.select_one("#o_wsale_cta_wrapper")  # botón de compra: oculto y con clase out_of_stock cuando no hay unidades
+    if w is None: return None
+    cls = " ".join(w.get("class", []))
+    if "out_of_stock" in cls: return "out"
+    if "d-none" in cls: return None
+    title = soup.select_one("h1")
+    return "preorder" if title and PREORDER.search(title.get_text(" ", strip=True)) else "stock"
+
+def apply_stock_list(s, items):
+    """Tiendas con filtro 'ocultar agotados' (stock_url): lo que sale en la lista filtrada tiene stock; lo demás, no."""
+    in_stock = {p["id"] for p in crawl(s, s["stock_url"])}
+    ids = {p["id"] for p in items}
+    if not in_stock: raise RuntimeError("la lista filtrada por stock salió vacía")
+    if len(in_stock) >= 0.98 * len(ids): raise RuntimeError("el filtro de stock no filtra nada (misma cantidad que la lista completa)")
+    if len(in_stock & ids) < 0.9 * len(in_stock): raise RuntimeError("la lista filtrada no coincide con la completa (¿cambió la web?)")
+    n_out = 0
+    for p in items:
+        if p["id"] in in_stock: p["status"] = "preorder" if p["status"] == "preorder" else "stock"
+        else: p["status"] = "out"; n_out += 1
+        p["in_stock"] = p["status"] != "out"
+    print(f"   {s['name']}: {len(in_stock)} con stock y {n_out} agotados según el filtro de la tienda")
+
+def verify_fichas(s, items, prev, now, watch=()):
+    """El listado de esta tienda no indica el stock: se abren fichas, máximo s['fichas'] por pasada.
+    Prioridad: sin verificar -> agotados (por si se reponen) -> el resto, de la comprobación más antigua a la más reciente."""
+    for p in items:
+        old = prev.get(p["id"])
+        if p["status"] == "out": p["checked_at"] = now  # el propio listado lo marca agotado: es fiable
+        elif old and old.get("checked_at"):             # conservar lo ya verificado hasta volver a comprobarlo
+            p["status"], p["in_stock"], p["checked_at"] = old["status"], old["status"] != "out", old["checked_at"]
+    budget = int(s["fichas"])
+    hot = [p for p in items if watch and matches(p["title"], watch)][:budget]  # tu lista de vigilancia: se comprueba en CADA pasada
+    hot_ids = {p["id"] for p in hot}
+    rest = [p for p in items if p["id"] not in hot_ids]
+    unv = [p for p in rest if not p.get("checked_at")]
+    out = sorted([p for p in rest if p.get("checked_at") and p["status"] == "out"], key=lambda p: p["checked_at"])
+    ok = sorted([p for p in rest if p.get("checked_at") and p["status"] != "out"], key=lambda p: p["checked_at"])
+    n_out = min(len(out), (budget - len(hot)) // 3)
+    chosen = hot + out[:n_out]; chosen += unv[:budget - len(chosen)]; chosen += ok[:budget - len(chosen)]; chosen += out[n_out:][:budget - len(chosen)]
+    checked = changed = 0
+    for p in chosen:
+        try: st = ficha_status(get(p["url"]).text)
+        except requests.RequestException: continue
+        if st is None: continue
+        checked += 1; changed += st != p["status"]
+        p["status"], p["in_stock"], p["checked_at"] = st, st != "out", now
+    for p in items:
+        if p.get("checked_at"): p.pop("unverified", None)
+        else: p["unverified"] = True
+    pend = sum(1 for p in items if p.get("unverified"))
+    print(f"   {s['name']}: {checked} fichas comprobadas, {changed} con estado distinto al del listado; sin verificar aún: {pend} de {len(items)}")
+
 def scrape_woo(s):
     """WooCommerce: API pública de productos. Si no está disponible, se usa la página HTML (url / fallback)."""
     out = []
     try:
-        for page in range(1, 31):
-            data = get(f"{s['base']}/wp-json/wc/store/v1/products?search=gundam&per_page=100&page={page}").json()
+        for page in range(1, 81):
+            r = get(f"{s['base']}/wp-json/wc/store/v1/products?search=gundam&per_page=100&page={page}")
+            data = r.json()
             if not isinstance(data, list) or not data: break
+            total_pages = int(r.headers.get("X-WP-TotalPages", 0) or 0)
             for p in data:
                 pr = p.get("prices") or {}
                 price = float(pr.get("price") or 0) / (10 ** int(pr.get("currency_minor_unit", 2)))
                 name = html.unescape(p.get("name", ""))
-                cats = " ".join(c.get("name", "") for c in p.get("categories", []))
+                cats = " ".join(f"{c.get('name', '')} {c.get('slug', '')}" for c in p.get("categories", []))
+                if s.get("solo_gundam") and not re.search(r"gundam|gunpla", f"{name} {cats}", re.I): continue  # tienda generalista
                 back = p.get("is_on_backorder") or (p.get("stock_availability") or {}).get("class") == "available-on-backorder"
                 st = "out" if not p.get("is_in_stock", True) else ("preorder" if back or PREORDER.search(f"{name} {cats}") else "stock")
                 out.append({"id": f"{s['name']}:{p['id']}", "store": s["name"], "title": name, "price": price,
                             "status": st, "in_stock": st != "out",
                             "image": ((p.get("images") or [{}])[0]).get("src", ""), "url": p.get("permalink", "")})
-            if len(data) < 100: break
+            if len(data) < 100 or (total_pages and page >= total_pages): break
     except (requests.RequestException, ValueError, KeyError, TypeError):
         out = []
-    out = [p for p in out if p["url"] and KEYWORDS.search(p["title"])]
+    out = [p for p in out if p["url"] and (s.get("solo_gundam") or KEYWORDS.search(p["title"]))]
     if out:
         print(f"   {s['name']}: leída con la API de WooCommerce"); USED[s["name"]] = "woo-api"; return out
     print(f"   {s['name']}: la API de WooCommerce no respondió; uso la página HTML")
@@ -327,7 +387,9 @@ def scrape_html(s):
     for url, is_search in cands:
         try: items = crawl(s, url)
         except requests.RequestException: continue
-        if is_search: items = [p for p in items if KEYWORDS.search(p["title"])]
+        if is_search:
+            n_all = len(items); items = [p for p in items if KEYWORDS.search(p["title"])]
+            print(f"   {s['name']}: {n_all} resultados de búsqueda, {len(items)} tras filtrar por palabras clave")
         if items: print(f"AUTO url {s['name']}: {url}"); USED[s["name"]] = url; return items
     return []
 
@@ -362,6 +424,7 @@ def main():
     RESPECT_ROBOTS = bool(cfg["respetar_robots"])
     if not RESPECT_ROBOTS: print("robots.txt: no se comprueba (respetar_robots = false en config.json)")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    watch0 = list(cfg["vigilar"]) + [w.strip() for w in os.getenv("WATCH", "").split(",") if w.strip()]
     f = DATA / "productos.json"
     est = DATA / "estado.json"
     old_p = json.loads(f.read_text()) if f.exists() else {}
@@ -374,7 +437,11 @@ def main():
     runners = {"shopify": scrape_shopify, "auto": scrape_auto, "woo": scrape_woo}
 
     def read_store(s):
-        try: return s, runners.get(s["type"], scrape_html)(s), None
+        try:
+            items = runners.get(s["type"], scrape_html)(s)
+            if s.get("stock_url") and items: apply_stock_list(s, items)
+            if s.get("fichas") and items: verify_fichas(s, items, prev, now, watch0)
+            return s, items, None
         except Exception as e: return s, None, e
     with ThreadPoolExecutor(max_workers=8) as ex:  # tiendas distintas a la vez; cada una mantiene su ritmo
         results = list(ex.map(read_store, STORES))
@@ -388,10 +455,13 @@ def main():
             stored = sources.get(s["name"])
             rebase = (stored is not None and stored != sig) or (stored is None and rev > 1 and s["name"] in known_stores)
             n0 = counts.get(s["name"], 0)
+            changed = rebase
             if not rebase and n0 >= 20 and len(items) < 0.7 * n0:
                 raise RuntimeError(f"solo {len(items)} productos frente a {n0} la vez anterior: lectura incompleta, se conservan los datos anteriores")
             if not items: raise RuntimeError("0 productos (¿cambió la web o el selector?)")
-            print(f"OK  {s['name']}: {len(items)}" + ("  (fuente cambiada: lectura inicial, sin avisos)" if rebase else "")); counts[s["name"]] = len(items); sources[s["name"]] = sig
+            grew = not rebase and n0 >= 10 and len(items) > 1.5 * n0 + 10  # p. ej. se arregló la paginación
+            rebase = rebase or grew
+            print(f"OK  {s['name']}: {len(items)}" + ("  (fuente cambiada: lectura inicial, sin avisos)" if changed else f"  (crecimiento brusco de {n0} a {len(items)}: lectura inicial, sin avisos)" if grew else "")); counts[s["name"]] = len(items); sources[s["name"]] = sig
         except Exception as e:
             print(f"ERR {s['name']}: {e}", file=sys.stderr); errors.append(s["name"])
             current.update({k: v for k, v in prev.items() if v["store"] == s["name"] and keep(v)}); continue
@@ -399,8 +469,8 @@ def main():
         ids = set()
         for p in items:
             ids.add(p["id"]); old = prev.get(p["id"])
-            p["first_seen"] = old["first_seen"] if old else (BASELINE if first_read else now)
-            p["restocked_at"] = old.get("restocked_at") if old else None
+            p["first_seen"] = BASELINE if (rebase or (first_read and not old)) else (old["first_seen"] if old else now)
+            p["restocked_at"] = None if rebase else (old.get("restocked_at") if old else None)
             current[p["id"]] = p
             if first_read: continue  # primera lectura (o fuente nueva) de una tienda: no avisar
             if not old: new.append(p); continue
@@ -410,7 +480,7 @@ def main():
                 notes[p["id"]] = ("ya a la venta (salió de preorder)" if before == "preorder"
                                   else "de nuevo en preorder" if p["status"] == "preorder" else "repuesto")
         for k, v in prev.items():  # desaparecidos = agotados
-            if v["store"] == s["name"] and k not in ids and keep(v):
+            if v["store"] == s["name"] and k not in ids and keep(v) and not rebase:
                 current[k] = {**v, "status": "out", "in_stock": False}
 
     prods = sorted(current.values(), key=lambda p: p["first_seen"], reverse=True)
