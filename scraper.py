@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "ps_json": True, "paginar": "param:page", "quickview": 25, "pausa_qv": 4, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 9},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "ps_json": True, "paginar": "param:page", "quickview": 25, "pausa_qv": 4, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -448,6 +448,8 @@ def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True):
             elif old and old.get("checked_at"):                                                                  # conservar lo ya verificado
                 p["status"], p["in_stock"], p["checked_at"] = old["status"], old["status"] != "out", old["checked_at"]
     budget = int(s.get("fichas") or s.get("quickview") or 0) if check else 0
+    if s.get("quickview") and items and not any(p.get("pid") is not None for p in items) and ("nopid", s["name"]) not in _DIAG:
+        _DIAG.add(("nopid", s["name"])); print(f"   {s['name']}: ningún producto trae su identificador (data-id-product); sin él no se puede usar la Vista rápida")
     pool = [p for p in items if p.get("checked_at") != now]  # lo verificado en esta misma pasada no se vuelve a pedir
     hot = [p for p in pool if watch and matches(p["title"], watch)][:budget]
     hot_ids = {p["id"] for p in hot}
@@ -608,7 +610,8 @@ def main():
             ck = f"{s['name']}#{s.get('rev', 1)}"
             if cooldown.get(ck, "") > now: raise RuntimeError(f"en pausa hasta {cooldown[ck]} por un rechazo anterior de la tienda (429 o 403); no se insiste")
             h = s.get("intervalo_h")
-            if h and last_read.get(s["name"]) and any(p["store"] == s["name"] for p in prev.values()) \
+            if h and last_read.get(s["name"]) and str(sources.get(s["name"], "")).split("|")[0] == str(s.get("rev", 1)) \
+               and any(p["store"] == s["name"] for p in prev.values()) \
                and (datetime.fromisoformat(now) - datetime.fromisoformat(last_read[s["name"]])).total_seconds() / 3600 < h:
                 print(f"   {s['name']}: leída hace menos de {h} h; se conservan los datos")
                 items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
