@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "solo_gundam": True, "pausa": 5, "max_paginas": 80, "rev": 4},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/?q=Disponibilidad-En+stock", "https://gunplaloompa.com/GundamHG-4/?q=Disponibilidad-En+stock", "https://gunplaloompa.com/gunplaMG-10/?q=Disponibilidad-En+stock"], "intervalo_h": 1, "pausa": 5, "max_paginas": 40, "max_minutos": 10, "rev": 6},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -444,6 +444,14 @@ def scrape_auto(s):
     return scrape_html(s)
 
 def scrape_html(s):
+    if s.get("urls"):  # varias listas (p. ej. una por gama): una lectura parcial marcaría como agotado lo que falta, así que si una falla se aborta todo
+        out, seen = [], set()
+        for u in s["urls"]:
+            for p in crawl(s, u):
+                if p["id"] not in seen: seen.add(p["id"]); out.append(p)
+        USED[s["name"]] = "|".join(s["urls"])
+        print(f"   {s['name']}: {len(out)} productos en {len(s['urls'])} listas")
+        return out
     if s.get("url"): cands = [(s["url"], bool(re.search(r"[?&](s|q|search|texto|mot_q)=", s["url"])))]
     else:
         cands = []
@@ -454,7 +462,8 @@ def scrape_html(s):
         cands.append((s["fallback"], bool(re.search(r"[?&](s|q|search|texto|mot_q)=", s["fallback"]))))
     for url, is_search in cands:
         try: items = crawl(s, url)
-        except requests.RequestException: continue
+        except requests.RequestException as e:
+            print(f"   {s['name']}: no se pudo leer {url[:80]}: {type(e).__name__}: {str(e)[:120]}"); continue
         if is_search:
             all_items = items; n_all = len(items); items = [p for p in items if KEYWORDS.search(p["title"])]
             print(f"   {s['name']}: {n_all} resultados de búsqueda, {len(items)} tras filtrar por palabras clave")
@@ -511,6 +520,7 @@ def main():
 
     full_info = dict(old_e.get("full", {})); full_done = {}
     cooldown = dict(old_e.get("pausa_hasta", {}))
+    last_read = dict(old_e.get("leido", {}))
     def cache_fresh(s):
         """True si la lista completa de esta tienda se leyó hace menos de 'completa_cada_h' horas."""
         h, info = s.get("completa_cada_h"), full_info.get(s["name"])
@@ -521,7 +531,13 @@ def main():
     def read_store(s):
         _CTX.deadline = time.time() + float(s.get("max_minutos", 10)) * 60  # una tienda lenta no puede bloquear al resto
         try:
-            if cooldown.get(s["name"], "") > now: raise RuntimeError(f"en pausa hasta {cooldown[s['name']]} por un 429 anterior (para no insistir)")
+            ck = f"{s['name']}#{s.get('rev', 1)}"
+            if cooldown.get(ck, "") > now: raise RuntimeError(f"en pausa hasta {cooldown[ck]} por un 429 anterior (para no insistir)")
+            h = s.get("intervalo_h")
+            if h and last_read.get(s["name"]) and any(p["store"] == s["name"] for p in prev.values()) \
+               and (datetime.fromisoformat(now) - datetime.fromisoformat(last_read[s["name"]])).total_seconds() / 3600 < h:
+                print(f"   {s['name']}: leída hace menos de {h} h; se conservan los datos")
+                return s, [dict(p) for p in prev.values() if p["store"] == s["name"]], None
             if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
                 filtered = read_filtered(s)
                 if filtered is None: raise RuntimeError("no se pudo leer la lista con stock; se conservan los datos anteriores")
@@ -535,6 +551,9 @@ def main():
                     if filtered is not None: apply_stock_list(s, items, filtered)
                     else: mark_unverified(items, prev); print(f"   {s['name']}: sin lista con stock; los productos se muestran como 'sin verificar'")
                 if s.get("completa_cada_h") and items: full_done[s["name"]] = {"at": now, "rev": s.get("rev", 1)}
+            if s.get("sin_stock") and items:  # no hay forma permitida de leer su stock: se muestra como 'sin verificar'
+                for p in items:
+                    if p["status"] != "out": p["unverified"] = True
             if s.get("fichas") and items: verify_fichas(s, items, prev, now, watch0)
             return s, items, None
         except Exception as e: return s, None, e
@@ -543,7 +562,7 @@ def main():
 
     for s in STORES:  # tiendas que siguieron respondiendo 429: pausa de 3 h antes de volver a probar
         if urlparse(s["base"]).netloc in _LIMITED:
-            cooldown[s["name"]] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
+            cooldown[f"{s['name']}#{s.get('rev', 1)}"] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
     cooldown = {k: v for k, v in cooldown.items() if v > now}
 
     for s, items, err in results:
@@ -551,7 +570,7 @@ def main():
             if err is not None: raise err
             items = [p for p in items if keep(p)]
             rev = s.get("rev", 1)
-            sig = f"{rev}|{USED.get(s['name'], s.get('url', s['type']))}"
+            sig = f"{rev}|{USED.get(s['name'], s.get('url') or '|'.join(s.get('urls', [])) or s['type'])}"
             stored = sources.get(s["name"])
             rebase = (stored is not None and stored != sig) or (stored is None and rev > 1 and s["name"] in known_stores)
             n0 = counts.get(s["name"], 0)
@@ -563,6 +582,7 @@ def main():
             rebase = rebase or grew
             print(f"OK  {s['name']}: {len(items)}" + ("  (fuente cambiada: lectura inicial, sin avisos)" if changed else f"  (crecimiento brusco de {n0} a {len(items)}: lectura inicial, sin avisos)" if grew else "")); counts[s["name"]] = len(items); sources[s["name"]] = sig
             if s["name"] in full_done: full_info[s["name"]] = full_done[s["name"]]
+            if not (s.get("intervalo_h") and USED.get(s["name"]) is None): last_read[s["name"]] = now
         except Exception as e:
             print(f"ERR {s['name']}: {e}", file=sys.stderr); errors.append(s["name"])
             for k, v in prev.items():  # se conservan los datos anteriores; si su stock nunca se verificó, se marca
@@ -591,7 +611,7 @@ def main():
     def write_if_changed(path, text):
         if not path.exists() or path.read_text() != text: path.write_text(text)
     write_if_changed(f, json.dumps({"products": prods}, ensure_ascii=False))  # solo cambia si cambian los productos
-    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "full": full_info, "pausa_hasta": cooldown}, ensure_ascii=False))
+    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "full": full_info, "pausa_hasta": cooldown, "leido": last_read}, ensure_ascii=False))
 
     items = "".join(f"<item><title>{escape(p['title'])} ({p['price']:.2f} €, {escape(p['store'])})</title>"
                     f"<link>{escape(p['url'])}</link><guid>{escape(p['id'])}</guid>"
