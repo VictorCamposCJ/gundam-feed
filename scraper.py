@@ -1,8 +1,8 @@
 """Recopila Gunpla de tiendas españolas, detecta novedades/reposiciones,
 avisa por Telegram y genera data/productos.json + data/feed.xml."""
-import json, os, re, sys, time, html, unicodedata
+import json, os, re, sys, time, html, unicodedata, threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from xml.sax.saxutils import escape
 import requests
@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/", "stock_url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "solo_gundam": True, "pausa": 5, "max_paginas": 150, "completa_cada_h": 6, "rev": 3},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "solo_gundam": True, "pausa": 5, "max_paginas": 80, "rev": 4},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -103,16 +103,30 @@ def robots_allows(url):
             best = (len(pat), allow)
     return True if best is None else best[1]
 
-_PAUSE = {}  # dominio -> pausa mínima tras recibir un 429
+_PAUSE = {}      # dominio -> pausa mínima tras recibir un 429
 _DIAG = set()
+_LIMITED = set() # dominios que siguieron respondiendo 429 tras los reintentos
+_CTX = threading.local()  # límite de tiempo de la tienda que está leyendo cada hilo
+
+class RateLimited(requests.RequestException):
+    pass
+
+class TimeBudget(requests.RequestException):
+    pass
 
 def get(url, pause=1.5, **kw):
     if RESPECT_ROBOTS and not robots_allows(url):
         print(f"   robots.txt no permite leer: {url}")
         raise RobotsBlocked(url)
     host = urlparse(url).netloc
-    last = None
-    for i in range(4):
+    dl = getattr(_CTX, "deadline", None)
+    def over(extra=0):
+        if dl and time.time() + extra > dl:
+            if ("t", host) not in _DIAG: _DIAG.add(("t", host)); print(f"   {host}: se alcanzó el tiempo máximo para esta tienda; se detiene la lectura")
+            raise TimeBudget(f"tiempo máximo agotado en {host}")
+    last, limited = None, False
+    for i in range(3):
+        over()
         time.sleep(max(pause, _PAUSE.get(host, 0)))
         try:
             r = requests.get(url, headers=UA, timeout=40, **kw)
@@ -122,14 +136,22 @@ def get(url, pause=1.5, **kw):
                     print(f"   {host}: datos del 429 · servidor={r.headers.get('Server')} · cloudflare={'sí' if r.headers.get('CF-RAY') else 'no'}"
                           f" · retry-after={r.headers.get('Retry-After')} · url={url[:90]} · cuerpo={r.text[:90]!r}")
                 ra = r.headers.get("Retry-After", "")
-                wait = min(int(ra), 180) if ra.isdigit() else 30 * (i + 1)
-                _PAUSE[host] = min(max(pause, _PAUSE.get(host, 0)) * 2, 12)
-                print(f"   {host}: demasiadas peticiones (429); espero {wait} s y bajo el ritmo a 1 cada {_PAUSE[host]:.0f} s")
-                time.sleep(wait); last = requests.HTTPError("429 Too Many Requests"); continue
+                wait = min(int(ra), 60) if ra.isdigit() else 30 * (i + 1)
+                _PAUSE[host] = min(max(pause, _PAUSE.get(host, 0)) * 2, 8)
+                print(f"   {host}: demasiadas peticiones (429); intento {i + 1} de 3")
+                limited = True
+                if i < 2: over(wait); time.sleep(wait)
+                continue
+            limited = False
             r.raise_for_status(); return r
+        except TimeBudget:
+            raise
         except requests.RequestException as e:
-            last = e
+            last = e; limited = False
             if getattr(getattr(e, "response", None), "status_code", 0) in (403, 404): break
+    if limited:
+        _LIMITED.add(host)
+        raise RateLimited(f"429 Too Many Requests en {host}; esta tienda se pone en pausa unas horas")
     raise last
 
 def scrape_shopify(s):
@@ -470,6 +492,7 @@ def matches(title, entries):
 
 def main():
     global RESPECT_ROBOTS
+    t0 = time.time()
     cfg = load_cfg()
     RESPECT_ROBOTS = bool(cfg["respetar_robots"])
     if not RESPECT_ROBOTS: print("robots.txt: no se comprueba (respetar_robots = false en config.json)")
@@ -487,6 +510,7 @@ def main():
     runners = {"shopify": scrape_shopify, "auto": scrape_auto, "woo": scrape_woo}
 
     full_info = dict(old_e.get("full", {})); full_done = {}
+    cooldown = dict(old_e.get("pausa_hasta", {}))
     def cache_fresh(s):
         """True si la lista completa de esta tienda se leyó hace menos de 'completa_cada_h' horas."""
         h, info = s.get("completa_cada_h"), full_info.get(s["name"])
@@ -495,7 +519,9 @@ def main():
         return (datetime.fromisoformat(now) - datetime.fromisoformat(info["at"])).total_seconds() / 3600 < h
 
     def read_store(s):
+        _CTX.deadline = time.time() + float(s.get("max_minutos", 10)) * 60  # una tienda lenta no puede bloquear al resto
         try:
+            if cooldown.get(s["name"], "") > now: raise RuntimeError(f"en pausa hasta {cooldown[s['name']]} por un 429 anterior (para no insistir)")
             if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
                 filtered = read_filtered(s)
                 if filtered is None: raise RuntimeError("no se pudo leer la lista con stock; se conservan los datos anteriores")
@@ -512,8 +538,13 @@ def main():
             if s.get("fichas") and items: verify_fichas(s, items, prev, now, watch0)
             return s, items, None
         except Exception as e: return s, None, e
-    with ThreadPoolExecutor(max_workers=8) as ex:  # tiendas distintas a la vez; cada una mantiene su ritmo
+    with ThreadPoolExecutor(max_workers=len(STORES)) as ex:  # todas las tiendas a la vez; cada una mantiene su ritmo
         results = list(ex.map(read_store, STORES))
+
+    for s in STORES:  # tiendas que siguieron respondiendo 429: pausa de 3 h antes de volver a probar
+        if urlparse(s["base"]).netloc in _LIMITED:
+            cooldown[s["name"]] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
+    cooldown = {k: v for k, v in cooldown.items() if v > now}
 
     for s, items, err in results:
         try:
@@ -534,7 +565,9 @@ def main():
             if s["name"] in full_done: full_info[s["name"]] = full_done[s["name"]]
         except Exception as e:
             print(f"ERR {s['name']}: {e}", file=sys.stderr); errors.append(s["name"])
-            current.update({k: v for k, v in prev.items() if v["store"] == s["name"] and keep(v)}); continue
+            for k, v in prev.items():  # se conservan los datos anteriores; si su stock nunca se verificó, se marca
+                if v["store"] == s["name"] and keep(v): current[k] = {**v, "unverified": True} if (s.get("stock_url") and not v.get("sv") and v.get("status") != "out") else v
+            continue
         first_read = s["name"] not in known_stores or rebase
         ids = set()
         for p in items:
@@ -558,7 +591,7 @@ def main():
     def write_if_changed(path, text):
         if not path.exists() or path.read_text() != text: path.write_text(text)
     write_if_changed(f, json.dumps({"products": prods}, ensure_ascii=False))  # solo cambia si cambian los productos
-    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "full": full_info}, ensure_ascii=False))
+    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "full": full_info, "pausa_hasta": cooldown}, ensure_ascii=False))
 
     items = "".join(f"<item><title>{escape(p['title'])} ({p['price']:.2f} €, {escape(p['store'])})</title>"
                     f"<link>{escape(p['url'])}</link><guid>{escape(p['id'])}</guid>"
@@ -566,6 +599,8 @@ def main():
                     for p in prods[:100])
     write_if_changed(DATA / "feed.xml", '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
         f"<title>Novedades Gunpla España</title><link>.</link><description>Novedades de tiendas</description>{items}</channel></rss>")
+
+    print(f"Duración total: {time.time() - t0:.0f} s")
 
     # ---- Avisos de Telegram, según config.json ----
     watch = list(cfg["vigilar"]) + [w.strip() for w in os.getenv("WATCH", "").split(",") if w.strip()]
