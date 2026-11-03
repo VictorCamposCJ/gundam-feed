@@ -1,0 +1,8 @@
+{
+  "avisar_novedades": true,
+  "avisar_reposiciones": true,
+  "avisar_preorders": true,
+  "solo_lista_vigilancia": false,
+  "vigilar": ["mg sazabi ver ka", "hg schwarzette"],
+  "ignorar": []
+}
