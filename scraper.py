@@ -26,12 +26,13 @@ STORES = [
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/busqueda?controller=search&s=gundam", "rev": 2},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "rev": 2},
-    {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "woo", "url": "https://lacuevaroja.com/?mot_q=gundam", "fallback": "https://lacuevaroja.com/gundam-assemble", "rev": 3},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "rev": 3},
+    {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
 ]
 
+GUNDAM_RX = re.compile(r"gundam|gunpla|\b(?:hg|rg|mg|pg|eg|sd|mgsd)[a-z]{0,4}\b", re.I)  # para categorías de marca (p. ej. /bandai)
 KEYWORDS = re.compile(r"gundam|gunpla|bandai|\b(hg|rg|mg|pg|sd|eg)\b|model kit|maqueta", re.I)
 ACCESORIO = (r"\bGD\s?-?\d{2,3}\b|decals?\b|calcas?\b|pegatinas?|stickers?|marcador|marker|rotulador|pintura|\bpaint\b|spray|barniz|"
              r"imprimaci|cutter|nipper|alicate|herramienta|\btools?\b|pincel|aer[oó]grafo|peana|expositor|display stand|action base|"
@@ -296,17 +297,22 @@ def ficha_status(page_html):
 
 def apply_stock_list(s, items):
     """Tiendas con filtro 'ocultar agotados' (stock_url): lo que sale en la lista filtrada tiene stock; lo demás, no."""
-    in_stock = {p["id"] for p in crawl(s, s["stock_url"])}
+    filtered = crawl(s, s["stock_url"])
+    in_stock = {p["id"] for p in filtered}
     ids = {p["id"] for p in items}
     if not in_stock: raise RuntimeError("la lista filtrada por stock salió vacía")
     if len(in_stock) >= 0.98 * len(ids): raise RuntimeError("el filtro de stock no filtra nada (misma cantidad que la lista completa)")
     if len(in_stock & ids) < 0.9 * len(in_stock): raise RuntimeError("la lista filtrada no coincide con la completa (¿cambió la web?)")
+    extra = [p for p in filtered if p["id"] not in ids]  # con stock pero ausentes de la lista completa: se añaden
+    for p in extra: p["status"] = "preorder" if p["status"] == "preorder" else "stock"; p["in_stock"] = True
+    items.extend(extra)
     n_out = 0
     for p in items:
         if p["id"] in in_stock: p["status"] = "preorder" if p["status"] == "preorder" else "stock"
         else: p["status"] = "out"; n_out += 1
         p["in_stock"] = p["status"] != "out"
-    print(f"   {s['name']}: {len(in_stock)} con stock y {n_out} agotados según el filtro de la tienda")
+    print(f"   {s['name']}: {len(in_stock)} con stock y {n_out} agotados según el filtro de la tienda"
+          + (f"; {len(extra)} productos solo estaban en la lista filtrada y se han añadido" if extra else ""))
 
 def verify_fichas(s, items, prev, now, watch=()):
     """El listado de esta tienda no indica el stock: se abren fichas, máximo s['fichas'] por pasada.
@@ -347,12 +353,16 @@ def scrape_woo(s):
             data = r.json()
             if not isinstance(data, list) or not data: break
             total_pages = int(r.headers.get("X-WP-TotalPages", 0) or 0)
+            if page == 1: api_total, received, dropped = r.headers.get("X-WP-Total", "?"), 0, []
+            received += len(data)
             for p in data:
                 pr = p.get("prices") or {}
                 price = float(pr.get("price") or 0) / (10 ** int(pr.get("currency_minor_unit", 2)))
                 name = html.unescape(p.get("name", ""))
                 cats = " ".join(f"{c.get('name', '')} {c.get('slug', '')}" for c in p.get("categories", []))
-                if s.get("solo_gundam") and not re.search(r"gundam|gunpla", f"{name} {cats}", re.I): continue  # tienda generalista
+                if s.get("solo_gundam") and not re.search(r"gundam|gunpla", f"{name} {cats}", re.I):  # tienda generalista
+                    if len(dropped) < 3: dropped.append(name)
+                    continue
                 back = p.get("is_on_backorder") or (p.get("stock_availability") or {}).get("class") == "available-on-backorder"
                 st = "out" if not p.get("is_in_stock", True) else ("preorder" if back or PREORDER.search(f"{name} {cats}") else "stock")
                 out.append({"id": f"{s['name']}:{p['id']}", "store": s["name"], "title": name, "price": price,
@@ -363,7 +373,9 @@ def scrape_woo(s):
         out = []
     out = [p for p in out if p["url"] and (s.get("solo_gundam") or KEYWORDS.search(p["title"]))]
     if out:
-        print(f"   {s['name']}: leída con la API de WooCommerce"); USED[s["name"]] = "woo-api"; return out
+        print(f"   {s['name']}: leída con la API de WooCommerce · la tienda declara {api_total} resultados, leídos {received}, "
+              f"guardados {len(out)} · ejemplos guardados: {[p['title'][:40] for p in out[:3]]} · ejemplos descartados: {[d[:40] for d in dropped]}")
+        USED[s["name"]] = "woo-api"; return out
     print(f"   {s['name']}: la API de WooCommerce no respondió; uso la página HTML")
     return scrape_html(s)
 
@@ -388,8 +400,12 @@ def scrape_html(s):
         try: items = crawl(s, url)
         except requests.RequestException: continue
         if is_search:
-            n_all = len(items); items = [p for p in items if KEYWORDS.search(p["title"])]
+            all_items = items; n_all = len(items); items = [p for p in items if KEYWORDS.search(p["title"])]
             print(f"   {s['name']}: {n_all} resultados de búsqueda, {len(items)} tras filtrar por palabras clave")
+            if n_all and not items: print(f"   {s['name']}: ejemplos descartados: {[p['title'][:45] for p in all_items[:5]]}")
+        if s.get("solo_gundam") and items:  # categoría de marca con más cosas aparte de Gundam
+            n_cat = len(items); items = [p for p in items if GUNDAM_RX.search(p["title"])]
+            print(f"   {s['name']}: {n_cat} productos en la categoría, {len(items)} son de Gundam/Gunpla")
         if items: print(f"AUTO url {s['name']}: {url}"); USED[s["name"]] = url; return items
     return []
 
