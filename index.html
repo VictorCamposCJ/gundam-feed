@@ -78,10 +78,11 @@ const status = p => p.status || (p.in_stock ? 'stock' : 'out');
 const LABEL = {stock:'En stock', preorder:'Preorder', out:'Agotado'};
 const CLS = {stock:'in', preorder:'pre', out:'out'};
 
-fetch('data/productos.json?'+Date.now()).then(r=>r.json()).then(d=>{
+Promise.all([fetch('data/productos.json?'+Date.now()).then(r=>r.json()), fetch('data/estado.json?'+Date.now()).then(r=>r.json()).catch(()=>({}))]).then(([d,e])=>{
   all = d.products;
-  $('meta').dataset.upd = d.updated ? new Date(d.updated).toLocaleString('es-ES',{dateStyle:'medium',timeStyle:'short'}) : 'sin datos todavía';
-  if (d.errors && d.errors.length){ $('warn').style.display='block'; $('warn').textContent='No se han podido actualizar: '+d.errors.join(', ')+'. Se muestran los últimos datos conocidos.'; }
+  const upd = e.updated || d.updated, errs = e.errors || d.errors || [];
+  $('meta').dataset.upd = upd ? new Date(upd).toLocaleString('es-ES',{dateStyle:'medium',timeStyle:'short'}) : 'sin datos todavía';
+  if (errs.length){ $('warn').style.display='block'; $('warn').textContent='No se han podido actualizar: '+errs.join(', ')+'. Se muestran los últimos datos conocidos.'; }
   [...new Set(all.map(p=>p.store))].sort().forEach(s=>$('store').add(new Option(s,s)));
   ['PG','MG','RG','HG','SD','EG','Figura','Accesorio','Otro'].filter(g=>all.some(p=>p.grade===g)).forEach(g=>{
     const b=document.createElement('button'); b.className='chip'; b.textContent=g; b.setAttribute('aria-pressed','false');
