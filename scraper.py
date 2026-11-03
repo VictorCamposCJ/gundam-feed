@@ -1,10 +1,12 @@
 """Recopila Gunpla de tiendas españolas, detecta novedades/reposiciones,
 avisa por Telegram y genera data/productos.json + data/feed.xml."""
 import json, os, re, sys, time, html, unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 import requests
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, urljoin
 from bs4 import BeautifulSoup
 
 # type: "shopify" (usa /products.json) o "prestashop" (HTML, selectores habituales).
@@ -19,13 +21,13 @@ STORES = [
     {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",    "type": "html", "url": "https://www.1001hobbies.es/26736-gunpla"},
     {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "html", "url": "https://www.pixelatoy.com/es/334-gunpla"},
     {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
-    {"name": "Impact Store", "base": "https://impactstore.es", "type": "html", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 2},
+    {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/buscar?texto=gundam", "rev": 2},
-    {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "html", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "rev": 2},
+    {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "rev": 3},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/busqueda?controller=search&s=gundam", "rev": 2},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com", "type": "html", "url": "https://www.mechauniverse.com/es/website/search?search=gundam&order=name+asc", "rev": 2},
-    {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/?mot_q=gundam", "rev": 2},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411"},
+    {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "woo", "url": "https://lacuevaroja.com/?mot_q=gundam", "fallback": "https://lacuevaroja.com/gundam-assemble", "rev": 3},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
 ]
@@ -54,7 +56,56 @@ def grade(title):
         if re.search(rx, title, re.I): return g
     return "Otro"
 
+RESPECT_ROBOTS = True  # se ajusta con "respetar_robots" en config.json
+BOT = "gundamfeedbot"
+_ROBOTS = {}
+
+class RobotsBlocked(requests.RequestException):
+    pass
+
+def parse_robots(text):
+    """Reglas Allow/Disallow que aplican a este bot (o a '*'), con comodines * y $."""
+    groups, agents, rules, in_rules = [], [], [], False
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if ":" not in line: continue
+        k, v = (x.strip() for x in line.split(":", 1)); k = k.lower()
+        if k == "user-agent":
+            if in_rules: groups.append((agents, rules)); agents, rules, in_rules = [], [], False
+            agents.append(v.lower())
+        elif k in ("allow", "disallow"):
+            in_rules = True
+            if v: rules.append((k == "allow", v))
+    groups.append((agents, rules))
+    pick = [g for g in groups if any(BOT in a for a in g[0])] or [g for g in groups if "*" in g[0]]
+    return [r for g in pick for r in g[1]]
+
+def rule_matches(pattern, target):
+    rx = re.escape(pattern).replace(r"\*", ".*")
+    if rx.endswith(r"\$"): rx = rx[:-2] + "$"
+    return re.match(rx, target) is not None
+
+def robots_allows(url):
+    u = urlparse(url); origin = f"{u.scheme}://{u.netloc}"
+    if origin not in _ROBOTS:
+        rules = []
+        try:
+            r = requests.get(origin + "/robots.txt", headers=UA, timeout=20)
+            if r.status_code == 200 and "html" not in r.headers.get("content-type", "").lower(): rules = parse_robots(r.text)
+        except requests.RequestException:
+            pass
+        _ROBOTS[origin] = rules
+    target = (u.path or "/") + (("?" + u.query) if u.query else "")
+    best = None  # (longitud de la regla, permitido); gana la más larga y, a igualdad, Allow
+    for allow, pat in _ROBOTS[origin]:
+        if rule_matches(pat, target) and (best is None or len(pat) > best[0] or (len(pat) == best[0] and allow)):
+            best = (len(pat), allow)
+    return True if best is None else best[1]
+
 def get(url, **kw):
+    if RESPECT_ROBOTS and not robots_allows(url):
+        print(f"   robots.txt no permite leer: {url}")
+        raise RobotsBlocked(url)
     last = None
     for i in range(3):
         time.sleep(1.5)
@@ -92,14 +143,19 @@ def card_text(node):
                     + [a.get("title", "") for a in node.select("a[title]")])
 
 def get_status(text, cls=""):
-    if SOLD.search(text) or "outofstock" in cls: return "out"
+    if SOLD.search(text) or OUT_CLS.search(cls) or "outofstock" in cls: return "out"
     return "preorder" if PREORDER.search(text) else "stock"
 
 def shopify_status(p, v):
     if not any(x.get("available") for x in v): return "out"
     return "preorder" if PREORDER.search(f"{p['title']} {' '.join(p.get('tags', []))} {p.get('product_type', '')}") else "stock"
 
-SOLD = re.compile(r"agotado|sin stock|out of stock|no disponible|sold out", re.I)
+SOLD = re.compile(r"agotado|sin stock|sin unidades|sin existencias|fuera de stock|no hay unidades|no quedan unidades|out of stock|no disponible|sold out", re.I)
+OUT_CLS = re.compile(r"out[-_ ]?of[-_ ]?stock|sold[-_ ]?out|agotado|sin[-_ ]?(stock|unidades)", re.I)
+
+def card_classes(node):
+    """Clases CSS de la tarjeta y de todo lo que lleva dentro (p. ej. el distintivo out_of_stock de PrestaShop)."""
+    return " ".join(" ".join(n.get("class", [])) for n in [node] + node.find_all(True))
 PRICE = re.compile(r"\d{1,3}(?:\.\d{3})*,\d{2}\s*€|€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€")
 BAD = re.compile(r"card|carta|tcg|trading", re.I)
 SEARCH_PATHS = ["/buscar?controller=search&s=gundam", "/search?controller=search&s=gundam",
@@ -132,7 +188,7 @@ def parse_cards(soup, s):
             if not title: continue
             pr = c.select_one("[itemprop=price], .price ins .amount, .price .amount, .price, .product-price")
             raw = (pr.get("content") or pr.get_text(" ")) if pr else ""
-            out.append(make(s, a, title, raw, card_text(c), img, " ".join(c.get("class", []))))
+            out.append(make(s, a, title, raw, card_text(c), img, card_classes(c)))
         if out: return out, sel
     return parse_generic(soup, s), "generic"
 
@@ -152,7 +208,7 @@ def parse_generic(soup, s):
                 links = [x for x in node.select("a[href]") if len(x.get_text(strip=True)) > 8]
                 href_a = max(links, key=lambda x: len(x.get_text(strip=True))) if links else a
                 title = (href_a.get_text(" ", strip=True) if links else "") or a.get("title") or img.get("alt") or ""
-                p = make(s, href_a, title, m.group(), card_text(node), img)
+                p = make(s, href_a, title, m.group(), card_text(node), img, card_classes(node))
                 if title and p["id"] not in seen: seen.add(p["id"]); out.append(p)
                 break
     return out
@@ -180,8 +236,25 @@ def next_link(soup, cur=1):
         if a.get_text(strip=True) == str(cur + 1) and h and not h.startswith(("#", "javascript")): return a
     return None
 
+PAGE_STYLES = [("param", "page"), ("param", "p"), ("param", "pagina"), ("param", "paged"), ("path", None)]
+
+def parse_style(txt):
+    if not txt: return None
+    return ("path", None) if txt == "path" else ("param", txt.split(":", 1)[1])
+
+def page_url(url, n, style):
+    kind, name = style; u = urlparse(url)
+    if kind == "param":
+        q = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if k != name] + [(name, str(n))]
+        return urlunparse(u._replace(query=urlencode(q)))
+    base = re.sub(r"/page/\d+/?$", "", u.path.rstrip("/"))
+    return urlunparse(u._replace(path=f"{base}/page/{n}" + ("/" if u.path.endswith("/") else "")))
+
 def crawl(s, url):
-    out, seen = [], set()
+    """Lee TODAS las páginas: sigue el enlace 'siguiente'; si no lo hay, prueba ?page=N, ?p=N, ?pagina=N, ?paged=N y /page/N.
+    En config se puede forzar con "paginar": "param:nombre" o "path"."""
+    first, out, seen, pages = url, [], set(), 0
+    style = parse_style(s.get("paginar"))
     for page in range(40):
         r = get(url); soup = BeautifulSoup(r.text, "html.parser")
         items, sel = parse_cards(soup, s)
@@ -190,12 +263,49 @@ def crawl(s, url):
             print(f"   {s['name']}: sin productos en {url} · título: {soup.title.string.strip() if soup.title and soup.title.string else '?'}"
                   f" · '€' en HTML: {r.text.count('€')} · ld+json: {'ld+json' in r.text} · bytes: {len(r.text)}")
         if not fresh: break
-        print(f"   {s['name']}: página {page + 1} -> {len(fresh)} productos nuevos") if os.getenv("DEBUG_PAGES") else None
-        seen.update(p["id"] for p in fresh); out += fresh
+        seen.update(p["id"] for p in fresh); out += fresh; pages += 1
+        if style: url = page_url(first, page + 2, style); continue
         nxt = next_link(soup, page + 1)
-        if not nxt or not nxt.get("href"): break
-        url = requests.compat.urljoin(url, nxt["href"])
+        if nxt: url = urljoin(url, nxt["href"]); continue
+        if page == 0 and len(fresh) >= 6:  # sin enlace "siguiente": probar patrones habituales de paginación
+            for st in PAGE_STYLES:
+                cand = page_url(first, 2, st)
+                try: items2, _ = parse_cards(BeautifulSoup(get(cand).text, "html.parser"), s)
+                except requests.RequestException: continue
+                if any(p["id"] not in seen for p in items2):
+                    style, url = st, cand
+                    print(f"   {s['name']}: paginación detectada ({st[0]}{':' + st[1] if st[1] else ''}); añade \"paginar\" en STORES para fijarla")
+                    break
+            if style: continue
+        break
+    print(f"   {s['name']}: {pages} página(s) leída(s)" + (" · LÍMITE de 40 alcanzado" if pages >= 40 else ""))
     return out
+
+def scrape_woo(s):
+    """WooCommerce: API pública de productos. Si no está disponible, se usa la página HTML (url / fallback)."""
+    out = []
+    try:
+        for page in range(1, 31):
+            data = get(f"{s['base']}/wp-json/wc/store/v1/products?search=gundam&per_page=100&page={page}").json()
+            if not isinstance(data, list) or not data: break
+            for p in data:
+                pr = p.get("prices") or {}
+                price = float(pr.get("price") or 0) / (10 ** int(pr.get("currency_minor_unit", 2)))
+                name = html.unescape(p.get("name", ""))
+                cats = " ".join(c.get("name", "") for c in p.get("categories", []))
+                back = p.get("is_on_backorder") or (p.get("stock_availability") or {}).get("class") == "available-on-backorder"
+                st = "out" if not p.get("is_in_stock", True) else ("preorder" if back or PREORDER.search(f"{name} {cats}") else "stock")
+                out.append({"id": f"{s['name']}:{p['id']}", "store": s["name"], "title": name, "price": price,
+                            "status": st, "in_stock": st != "out",
+                            "image": ((p.get("images") or [{}])[0]).get("src", ""), "url": p.get("permalink", "")})
+            if len(data) < 100: break
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        out = []
+    out = [p for p in out if p["url"] and KEYWORDS.search(p["title"])]
+    if out:
+        print(f"   {s['name']}: leída con la API de WooCommerce"); USED[s["name"]] = "woo-api"; return out
+    print(f"   {s['name']}: la API de WooCommerce no respondió; uso la página HTML")
+    return scrape_html(s)
 
 def scrape_auto(s):
     try:
@@ -212,6 +322,8 @@ def scrape_html(s):
         try: cands = [(u, False) for u in gundam_candidates(s)]
         except requests.RequestException as e: print(f"   {s['name']}: portada no disponible ({e})")
         cands += [(s["base"] + p, True) for p in SEARCH_PATHS]
+    if s.get("url") and s.get("fallback"):
+        cands.append((s["fallback"], bool(re.search(r"[?&](s|q|search|texto|mot_q)=", s["fallback"]))))
     for url, is_search in cands:
         try: items = crawl(s, url)
         except requests.RequestException: continue
@@ -228,7 +340,7 @@ def telegram(text):
                             "disable_web_page_preview": True})
 
 DEFAULT_CFG = {"avisar_novedades": True, "avisar_reposiciones": True, "avisar_preorders": True,
-               "solo_lista_vigilancia": False, "vigilar": [], "ignorar": []}
+               "solo_lista_vigilancia": False, "vigilar": [], "ignorar": [], "respetar_robots": True}
 
 def load_cfg():
     try: return {**DEFAULT_CFG, **json.loads(Path("config.json").read_text(encoding="utf-8"))}
@@ -245,20 +357,31 @@ def matches(title, entries):
     return any(e and all(w in tw for w in e) for e in (words(x) for x in entries))
 
 def main():
+    global RESPECT_ROBOTS
     cfg = load_cfg()
+    RESPECT_ROBOTS = bool(cfg["respetar_robots"])
+    if not RESPECT_ROBOTS: print("robots.txt: no se comprueba (respetar_robots = false en config.json)")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     f = DATA / "productos.json"
-    old_data = json.loads(f.read_text()) if f.exists() else {}
-    prev = {p["id"]: p for p in old_data.get("products", [])}
-    counts = dict(old_data.get("counts", {}))
-    sources = dict(old_data.get("sources", {}))
+    est = DATA / "estado.json"
+    old_p = json.loads(f.read_text()) if f.exists() else {}
+    old_e = json.loads(est.read_text()) if est.exists() else {}
+    prev = {p["id"]: p for p in old_p.get("products", [])}
+    counts = dict(old_e.get("counts", old_p.get("counts", {})))
+    sources = dict(old_e.get("sources", old_p.get("sources", {})))
     known_stores = {p["store"] for p in prev.values()}
     current, new, restock, notes, errors = {}, [], [], {}, []
-    runners = {"shopify": scrape_shopify, "auto": scrape_auto}
+    runners = {"shopify": scrape_shopify, "auto": scrape_auto, "woo": scrape_woo}
 
-    for s in STORES:
+    def read_store(s):
+        try: return s, runners.get(s["type"], scrape_html)(s), None
+        except Exception as e: return s, None, e
+    with ThreadPoolExecutor(max_workers=8) as ex:  # tiendas distintas a la vez; cada una mantiene su ritmo
+        results = list(ex.map(read_store, STORES))
+
+    for s, items, err in results:
         try:
-            items = runners.get(s["type"], scrape_html)(s)
+            if err is not None: raise err
             items = [p for p in items if keep(p)]
             rev = s.get("rev", 1)
             sig = f"{rev}|{USED.get(s['name'], s.get('url', s['type']))}"
@@ -292,13 +415,16 @@ def main():
 
     prods = sorted(current.values(), key=lambda p: p["first_seen"], reverse=True)
     for p in prods: p["grade"] = grade(p["title"])
-    f.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "products": prods}, ensure_ascii=False))
+    def write_if_changed(path, text):
+        if not path.exists() or path.read_text() != text: path.write_text(text)
+    write_if_changed(f, json.dumps({"products": prods}, ensure_ascii=False))  # solo cambia si cambian los productos
+    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources}, ensure_ascii=False))
 
     items = "".join(f"<item><title>{escape(p['title'])} ({p['price']:.2f} €, {escape(p['store'])})</title>"
                     f"<link>{escape(p['url'])}</link><guid>{escape(p['id'])}</guid>"
                     f"<pubDate>{datetime.fromisoformat(p['first_seen']).strftime('%a, %d %b %Y %H:%M:%S +0000')}</pubDate></item>"
                     for p in prods[:100])
-    (DATA / "feed.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
+    write_if_changed(DATA / "feed.xml", '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
         f"<title>Novedades Gunpla España</title><link>.</link><description>Novedades de tiendas</description>{items}</channel></rss>")
 
     # ---- Avisos de Telegram, según config.json ----
