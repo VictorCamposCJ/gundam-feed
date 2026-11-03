@@ -22,9 +22,9 @@ STORES = [
     {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "html", "url": "https://www.pixelatoy.com/es/334-gunpla"},
     {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
-    {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/buscar?texto=gundam", "rev": 2},
+    {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?licencias%5B%5D=113", "stock_url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 3},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/busqueda?controller=search&s=gundam", "rev": 2},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/", "stock_url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "max_paginas": 120, "rev": 3},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -256,7 +256,8 @@ def crawl(s, url):
     En config se puede forzar con "paginar": "param:nombre" o "path"."""
     first, out, seen, pages = url, [], set(), 0
     style = parse_style(s.get("paginar"))
-    for page in range(40):
+    limit = int(s.get("max_paginas", 40))
+    for page in range(limit):
         r = get(url); soup = BeautifulSoup(r.text, "html.parser")
         items, sel = parse_cards(soup, s)
         fresh = [p for p in items if p["id"] not in seen]
@@ -279,7 +280,7 @@ def crawl(s, url):
                     break
             if style: continue
         break
-    print(f"   {s['name']}: {pages} página(s) leída(s)" + (" · LÍMITE de 40 alcanzado" if pages >= 40 else ""))
+    print(f"   {s['name']}: {pages} página(s) leída(s)" + (f" · LÍMITE de {limit} alcanzado: puede haber más productos; sube max_paginas" if pages >= limit else ""))
     return out
 
 def ficha_status(page_html):
@@ -309,6 +310,7 @@ def apply_stock_list(s, items):
     n_out = 0
     for p in items:
         if p["id"] in in_stock: p["status"] = "preorder" if p["status"] == "preorder" else "stock"
+        elif p["status"] == "preorder": pass  # no sale en la lista con stock, pero su tarjeta indica preventa
         else: p["status"] = "out"; n_out += 1
         p["in_stock"] = p["status"] != "out"
     print(f"   {s['name']}: {len(in_stock)} con stock y {n_out} agotados según el filtro de la tienda"
