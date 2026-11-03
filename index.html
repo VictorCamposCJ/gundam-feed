@@ -7,8 +7,8 @@
 <link rel="alternate" type="application/rss+xml" href="data/feed.xml" title="Novedades Gunpla">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#f2f2ee;--panel:#fff;--ink:#23262b;--mute:#666b73;--line:#d9d9d2;--blue:#1d4f9f;--red:#c8202f;--yellow:#f0b90b}
-@media (prefers-color-scheme:dark){:root{--bg:#16181c;--panel:#1f2227;--ink:#ecebe6;--mute:#9aa0a8;--line:#33373e;--blue:#6b9bea;--red:#ef5a66;--yellow:#f0b90b}}
+:root{--bg:#f2f2ee;--panel:#fff;--ink:#23262b;--mute:#666b73;--line:#d9d9d2;--blue:#1d4f9f;--red:#c8202f;--yellow:#f0b90b;--amber:#a15c00}
+@media (prefers-color-scheme:dark){:root{--bg:#16181c;--panel:#1f2227;--ink:#ecebe6;--mute:#9aa0a8;--line:#33373e;--blue:#6b9bea;--red:#ef5a66;--yellow:#f0b90b;--amber:#f0b90b}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Barlow,system-ui,sans-serif}
 header{border-bottom:6px solid var(--blue);box-shadow:0 6px 0 var(--red);background:var(--panel);margin-bottom:12px}
@@ -37,7 +37,10 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
 .card h3{font:600 1rem/1.25 Barlow,sans-serif;margin:0;flex:1}
 .card .pr{font:700 1.3rem "Barlow Condensed",sans-serif}
 .card .st{color:var(--mute);font-size:.88rem}
-.out{opacity:.55}.out .st b{color:var(--red)}.in .st b{color:#1d8a4a}
+.out{opacity:.55}.out .st b{color:var(--red)}.in .st b{color:#1d8a4a}.pre .st b{color:var(--amber)}
+.card .tag.re{background:var(--blue);color:#fff}
+.tabs{flex-basis:100%;gap:8px}
+.tab{font-size:1.1rem;padding:6px 16px}
 .empty{padding:40px 0;color:var(--mute)}
 </style>
 </head>
@@ -47,12 +50,17 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
   <p>Productos de tiendas españolas, ordenados por lo último que ha aparecido. <a href="data/feed.xml">Feed RSS</a></p>
 </div></header>
 <div class="bar"><div class="wrap row">
+  <div class="row tabs" id="tabs" role="group" aria-label="Vista">
+    <button class="chip tab" data-tab="all" aria-pressed="true">Todo</button>
+    <button class="chip tab" data-tab="new" aria-pressed="false">Novedades</button>
+    <button class="chip tab" data-tab="restock" aria-pressed="false">Reposiciones</button>
+  </div>
   <input type="search" id="q" placeholder="Buscar: RG Nu, Sazabi, Aerial…" aria-label="Buscar">
   <select id="store" aria-label="Tienda"><option value="">Todas las tiendas</option></select>
   <select id="sort" aria-label="Ordenar">
     <option value="new">Más recientes</option><option value="pa">Precio: menor a mayor</option><option value="pd">Precio: mayor a menor</option>
   </select>
-  <label class="chk"><input type="checkbox" id="stock"> Solo con stock</label>
+  <select id="avail" aria-label="Disponibilidad"><option value="">Cualquier disponibilidad</option><option value="stock">En stock</option><option value="preorder">Preorder</option><option value="out">Agotado</option></select>
   <label class="chk"><input type="checkbox" id="noacc" checked> Ocultar accesorios</label>
   <div class="row" id="grades" role="group" aria-label="Gama"></div>
 </div></div>
@@ -63,14 +71,16 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
 </div>
 <script>
 const $ = id => document.getElementById(id);
-let all = [], gradeSel = new Set();
+let all = [], gradeSel = new Set(), tab = 'all';
 const eur = n => n ? n.toLocaleString('es-ES',{style:'currency',currency:'EUR'}) : 'Consultar';
-const DAYS7 = 7*864e5;
+const DAY = 864e5, NEW_MS = 7*DAY, RE_MS = 14*DAY;
+const status = p => p.status || (p.in_stock ? 'stock' : 'out');
+const LABEL = {stock:'En stock', preorder:'Preorder', out:'Agotado'};
+const CLS = {stock:'in', preorder:'pre', out:'out'};
 
 fetch('data/productos.json?'+Date.now()).then(r=>r.json()).then(d=>{
   all = d.products;
-  const upd = d.updated ? new Date(d.updated).toLocaleString('es-ES',{dateStyle:'medium',timeStyle:'short'}) : 'sin datos todavía';
-  $('meta').dataset.upd = upd;
+  $('meta').dataset.upd = d.updated ? new Date(d.updated).toLocaleString('es-ES',{dateStyle:'medium',timeStyle:'short'}) : 'sin datos todavía';
   if (d.errors && d.errors.length){ $('warn').style.display='block'; $('warn').textContent='No se han podido actualizar: '+d.errors.join(', ')+'. Se muestran los últimos datos conocidos.'; }
   [...new Set(all.map(p=>p.store))].sort().forEach(s=>$('store').add(new Option(s,s)));
   ['PG','MG','RG','HG','SD','EG','Figura','Accesorio','Otro'].filter(g=>all.some(p=>p.grade===g)).forEach(g=>{
@@ -81,22 +91,31 @@ fetch('data/productos.json?'+Date.now()).then(r=>r.json()).then(d=>{
   render();
 }).catch(()=>{ $('grid').innerHTML='<p class="empty">No se pudo cargar data/productos.json. Ejecuta el scraper primero.</p>'; });
 
-['q','store','sort','stock','noacc'].forEach(id=>$(id).addEventListener('input',render));
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  tab=b.dataset.tab; document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-pressed',x===b)); render();
+});
+['q','store','sort','avail','noacc'].forEach(id=>$(id).addEventListener('input',render));
 
 function render(){
-  const q=$('q').value.trim().toLowerCase(), st=$('store').value, onlyStock=$('stock').checked, noAcc=$('noacc').checked;
-  let list=all.filter(p=>(!q||p.title.toLowerCase().includes(q))&&(!st||p.store===st)&&(!onlyStock||p.in_stock)&&(!gradeSel.size||gradeSel.has(p.grade))&&(!noAcc||gradeSel.has('Accesorio')||p.grade!=='Accesorio'));
-  const s=$('sort').value;
-  if(s==='pa') list.sort((a,b)=>a.price-b.price); else if(s==='pd') list.sort((a,b)=>b.price-a.price);
-  $('meta').textContent=`${list.length} productos · actualizado ${$('meta').dataset.upd}`;
-  const now=Date.now(), esc=t=>t.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  $('grid').innerHTML=list.length?list.slice(0,300).map(p=>`
-    <a class="card ${p.in_stock?'in':'out'}" href="${esc(p.url)}" target="_blank" rel="noopener">
+  const q=$('q').value.trim().toLowerCase(), st=$('store').value, av=$('avail').value, noAcc=$('noacc').checked, now=Date.now();
+  let list=all.filter(p=>(!q||p.title.toLowerCase().includes(q))&&(!st||p.store===st)&&(!av||status(p)===av)
+    &&(!gradeSel.size||gradeSel.has(p.grade))&&(!noAcc||gradeSel.has('Accesorio')||p.grade!=='Accesorio'));
+  if(tab==='new') list=list.filter(p=>now-new Date(p.first_seen)<NEW_MS).sort((a,b)=>new Date(b.first_seen)-new Date(a.first_seen));
+  else if(tab==='restock') list=list.filter(p=>p.restocked_at&&now-new Date(p.restocked_at)<RE_MS).sort((a,b)=>new Date(b.restocked_at)-new Date(a.restocked_at));
+  else { const s=$('sort').value; if(s==='pa') list.sort((a,b)=>a.price-b.price); else if(s==='pd') list.sort((a,b)=>b.price-a.price); }
+  const hint = tab==='new' ? ' · añadidos en los últimos 7 días' : tab==='restock' ? ' · repuestos o salidos de preorder en los últimos 14 días' : '';
+  $('meta').textContent=`${list.length} productos${hint} · actualizado ${$('meta').dataset.upd}`;
+  const esc=t=>t.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const empty = tab==='new' ? 'Todavía no hay novedades: aparecerán cuando alguna tienda añada productos.'
+              : tab==='restock' ? 'Todavía no hay reposiciones registradas.' : 'Ningún producto coincide con estos filtros.';
+  $('grid').innerHTML=list.length?list.slice(0,300).map(p=>{
+    const s=status(p), isRe=p.restocked_at&&now-new Date(p.restocked_at)<RE_MS, isNew=now-new Date(p.first_seen)<NEW_MS;
+    return `<a class="card ${CLS[s]}" href="${esc(p.url)}" target="_blank" rel="noopener">
       <div class="im">${p.image?`<img loading="lazy" src="${esc(p.image)}" alt="">`:''}
-        ${now-new Date(p.first_seen)<DAYS7?'<span class="tag">Nuevo</span>':''}<span class="gr">${p.grade}</span></div>
+        ${isRe?'<span class="tag re">Repuesto</span>':isNew?'<span class="tag">Nuevo</span>':''}<span class="gr">${p.grade}</span></div>
       <div class="tx"><h3>${esc(p.title)}</h3><div class="pr">${eur(p.price)}</div>
-      <div class="st">${esc(p.store)} · <b>${p.in_stock?'En stock':'Agotado'}</b></div></div></a>`).join('')
-    :'<p class="empty">Ningún producto coincide con estos filtros.</p>';
+      <div class="st">${esc(p.store)} · <b>${LABEL[s]}</b></div></div></a>`;}).join('')
+    :`<p class="empty">${empty}</p>`;
 }
 </script>
 </body>
