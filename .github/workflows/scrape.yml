@@ -17,7 +17,9 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install requests beautifulsoup4
       - run: python scraper.py
+        timeout-minutes: 20
         env:
+          PYTHONUNBUFFERED: "1"
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH: ${{ vars.WATCH }}
