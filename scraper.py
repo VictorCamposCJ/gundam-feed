@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/", "stock_url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "solo_gundam": True, "pausa": 3, "max_paginas": 150, "completa_cada_h": 6, "rev": 3},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/", "stock_url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "solo_gundam": True, "pausa": 5, "max_paginas": 150, "completa_cada_h": 6, "rev": 3},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -104,6 +104,7 @@ def robots_allows(url):
     return True if best is None else best[1]
 
 _PAUSE = {}  # dominio -> pausa mínima tras recibir un 429
+_DIAG = set()
 
 def get(url, pause=1.5, **kw):
     if RESPECT_ROBOTS and not robots_allows(url):
@@ -116,6 +117,10 @@ def get(url, pause=1.5, **kw):
         try:
             r = requests.get(url, headers=UA, timeout=40, **kw)
             if r.status_code == 429:  # la tienda pide ir más despacio: se respeta
+                if host not in _DIAG:
+                    _DIAG.add(host)
+                    print(f"   {host}: datos del 429 · servidor={r.headers.get('Server')} · cloudflare={'sí' if r.headers.get('CF-RAY') else 'no'}"
+                          f" · retry-after={r.headers.get('Retry-After')} · url={url[:90]} · cuerpo={r.text[:90]!r}")
                 ra = r.headers.get("Retry-After", "")
                 wait = min(int(ra), 180) if ra.isdigit() else 30 * (i + 1)
                 _PAUSE[host] = min(max(pause, _PAUSE.get(host, 0)) * 2, 12)
@@ -306,9 +311,9 @@ def ficha_status(page_html):
     title = soup.select_one("h1")
     return "preorder" if title and PREORDER.search(title.get_text(" ", strip=True)) else "stock"
 
-def apply_stock_list(s, items):
+def apply_stock_list(s, items, filtered=None):
     """Tiendas con filtro 'ocultar agotados' (stock_url): lo que sale en la lista filtrada tiene stock; lo demás, no."""
-    filtered = crawl(s, s["stock_url"])
+    if filtered is None: filtered = crawl(s, s["stock_url"])
     if s.get("solo_gundam"): filtered = [p for p in filtered if GUNDAM_RX.search(p["title"])]
     fmap = {p["id"]: p for p in filtered}
     in_stock = set(fmap)
@@ -326,9 +331,22 @@ def apply_stock_list(s, items):
             p["status"] = "preorder" if (p["status"] == "preorder" or f["status"] == "preorder") else "stock"
         elif p["status"] == "preorder": pass  # no sale en la lista con stock, pero su tarjeta indica preventa
         else: p["status"] = "out"; n_out += 1
-        p["in_stock"] = p["status"] != "out"
+        p["in_stock"] = p["status"] != "out"; p["sv"] = True; p.pop("unverified", None)  # sv = stock verificado con la lista de la tienda
     print(f"   {s['name']}: {len(in_stock)} con stock y {n_out} agotados según el filtro de la tienda"
           + (f"; {len(extra)} productos solo estaban en la lista filtrada y se han añadido" if extra else ""))
+
+def read_filtered(s):
+    """Lee la lista con stock; si la tienda la rechaza (429, bloqueo...) devuelve None sin romper nada."""
+    try: return crawl(s, s["stock_url"])
+    except requests.RequestException as e:
+        print(f"   {s['name']}: no se pudo leer la lista con stock ({e})"); return None
+
+def mark_unverified(items, prev):
+    """Sin lista con stock no se sabe el estado real: se conserva lo ya verificado y el resto se muestra 'sin verificar'."""
+    for p in items:
+        old = prev.get(p["id"])
+        if old and old.get("sv"): p["status"], p["in_stock"], p["sv"] = old["status"], old["status"] != "out", True
+        elif p["status"] != "out": p["unverified"] = True
 
 def verify_fichas(s, items, prev, now, watch=()):
     """El listado de esta tienda no indica el stock: se abren fichas, máximo s['fichas'] por pasada.
@@ -479,12 +497,17 @@ def main():
     def read_store(s):
         try:
             if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
+                filtered = read_filtered(s)
+                if filtered is None: raise RuntimeError("no se pudo leer la lista con stock; se conservan los datos anteriores")
                 items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
-                apply_stock_list(s, items)
+                apply_stock_list(s, items, filtered)
                 print(f"   {s['name']}: lista completa en caché (< {s['completa_cada_h']} h); solo se ha leído la lista con stock")
             else:
+                filtered = read_filtered(s) if s.get("stock_url") else None  # primero la lista con stock (pocas peticiones)
                 items = runners.get(s["type"], scrape_html)(s)
-                if s.get("stock_url") and items: apply_stock_list(s, items)
+                if s.get("stock_url") and items:
+                    if filtered is not None: apply_stock_list(s, items, filtered)
+                    else: mark_unverified(items, prev); print(f"   {s['name']}: sin lista con stock; los productos se muestran como 'sin verificar'")
                 if s.get("completa_cada_h") and items: full_done[s["name"]] = {"at": now, "rev": s.get("rev", 1)}
             if s.get("fichas") and items: verify_fichas(s, items, prev, now, watch0)
             return s, items, None
