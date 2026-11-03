@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/?q=Disponibilidad-En+stock", "https://gunplaloompa.com/GundamHG-4/?q=Disponibilidad-En+stock", "https://gunplaloompa.com/gunplaMG-10/?q=Disponibilidad-En+stock"], "intervalo_h": 1, "pausa": 5, "max_paginas": 40, "max_minutos": 10, "rev": 6},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "sin_stock": True, "intervalo_h": 6, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 7},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -106,6 +106,7 @@ def robots_allows(url):
 _PAUSE = {}      # dominio -> pausa mínima tras recibir un 429
 _DIAG = set()
 _LIMITED = set() # dominios que siguieron respondiendo 429 tras los reintentos
+_BLOCKED = set() # dominios que respondieron 403 (acceso denegado)
 _CTX = threading.local()  # límite de tiempo de la tienda que está leyendo cada hilo
 
 class RateLimited(requests.RequestException):
@@ -148,7 +149,9 @@ def get(url, pause=1.5, **kw):
             raise
         except requests.RequestException as e:
             last = e; limited = False
-            if getattr(getattr(e, "response", None), "status_code", 0) in (403, 404): break
+            code = getattr(getattr(e, "response", None), "status_code", 0)
+            if code == 403: _BLOCKED.add(host)
+            if code in (403, 404): break
     if limited:
         _LIMITED.add(host)
         raise RateLimited(f"429 Too Many Requests en {host}; esta tienda se pone en pausa unas horas")
@@ -532,7 +535,7 @@ def main():
         _CTX.deadline = time.time() + float(s.get("max_minutos", 10)) * 60  # una tienda lenta no puede bloquear al resto
         try:
             ck = f"{s['name']}#{s.get('rev', 1)}"
-            if cooldown.get(ck, "") > now: raise RuntimeError(f"en pausa hasta {cooldown[ck]} por un 429 anterior (para no insistir)")
+            if cooldown.get(ck, "") > now: raise RuntimeError(f"en pausa hasta {cooldown[ck]} por un rechazo anterior de la tienda (429 o 403); no se insiste")
             h = s.get("intervalo_h")
             if h and last_read.get(s["name"]) and any(p["store"] == s["name"] for p in prev.values()) \
                and (datetime.fromisoformat(now) - datetime.fromisoformat(last_read[s["name"]])).total_seconds() / 3600 < h:
@@ -560,9 +563,11 @@ def main():
     with ThreadPoolExecutor(max_workers=len(STORES)) as ex:  # todas las tiendas a la vez; cada una mantiene su ritmo
         results = list(ex.map(read_store, STORES))
 
-    for s in STORES:  # tiendas que siguieron respondiendo 429: pausa de 3 h antes de volver a probar
-        if urlparse(s["base"]).netloc in _LIMITED:
-            cooldown[f"{s['name']}#{s.get('rev', 1)}"] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
+    for s, items, err in results:  # tiendas que fallaron y además rechazaron las peticiones: pausa antes de volver a probar
+        host = urlparse(s["base"]).netloc
+        if err is None and items: continue
+        hours = 3 if host in _LIMITED else 6 if host in _BLOCKED else 0
+        if hours: cooldown[f"{s['name']}#{s.get('rev', 1)}"] = (datetime.fromisoformat(now) + timedelta(hours=hours)).isoformat(timespec="seconds")
     cooldown = {k: v for k, v in cooldown.items() if v > now}
 
     for s, items, err in results:
