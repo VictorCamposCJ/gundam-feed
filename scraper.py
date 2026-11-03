@@ -10,23 +10,24 @@ from bs4 import BeautifulSoup
 # type: "shopify" (usa /products.json) o "prestashop" (HTML, selectores habituales).
 # Si una tienda falla, el log lo dice y se conservan sus datos anteriores.
 STORES = [
-    # type "shopify": usa /products.json | "html": categoría fija (url) o descubierta | "auto": prueba Shopify y si no, HTML
+    # type "shopify": usa /products.json | "html": página de categoría o de búsqueda fija (url)
+    # "rev": súbelo (3, 4...) cuando cambies la url de una tienda: esa lectura cuenta como inicial y no manda avisos falsos.
     {"name": "Robotines",    "base": "https://www.robotines.com",     "type": "html", "url": "https://www.robotines.com/es/35-maquetas-gundam"},
     {"name": "Lost Bunker",  "base": "https://lostbunker.com",        "type": "shopify"},
     {"name": "La Escotilla", "base": "https://laescotillajuegos.com", "type": "shopify"},
     {"name": "Gold Saucer",  "base": "https://goldsaucerstore.es",    "type": "html", "url": "https://goldsaucerstore.es/60-model-kits-gundam"},
-    {"name": "Impact Store", "base": "https://impactstore.es",        "type": "html", "url": "https://impactstore.es/?s=gundam&post_type=product"},
-    {"name": "Kurogami",     "base": "https://kurogami.com",          "type": "html", "url": "https://kurogami.com/buscar?controller=search&s=gundam"},
     {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",    "type": "html", "url": "https://www.1001hobbies.es/26736-gunpla"},
-    # Nuevas: sin url fija. Cuando el log muestre "AUTO url <tienda>: ..." correcta, cópiala aquí como "url" para fijarla.
-    {"name": "Geosan Battle",    "base": "https://geosanbattle.com",    "type": "auto"},
-    {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "auto"},
-    {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "auto"},
-    {"name": "Empire Games",     "base": "https://empiregames.es",      "type": "auto"},
-    {"name": "Gunpla Loompa",    "base": "https://gunplaloompa.com",    "type": "auto"},
-    {"name": "Gunpla.es",        "base": "https://gunpla.es",           "type": "auto"},
-    {"name": "Mecha Universe",   "base": "https://www.mechauniverse.com/es", "type": "auto"},
-    {"name": "La Cueva Roja",    "base": "https://lacuevaroja.com",     "type": "auto"},
+    {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "html", "url": "https://www.pixelatoy.com/es/334-gunpla"},
+    {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
+    {"name": "Impact Store", "base": "https://impactstore.es", "type": "html", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 2},
+    {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/buscar?texto=gundam", "rev": 2},
+    {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "html", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "rev": 2},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/busqueda?controller=search&s=gundam", "rev": 2},
+    {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com", "type": "html", "url": "https://www.mechauniverse.com/es/website/search?search=gundam&order=name+asc", "rev": 2},
+    {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/?mot_q=gundam", "rev": 2},
+    # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
+    # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
 ]
 
 KEYWORDS = re.compile(r"gundam|gunpla|bandai|\b(hg|rg|mg|pg|sd|eg)\b|model kit|maqueta", re.I)
@@ -45,6 +46,7 @@ GRADES = [("Accesorio", ACCESORIO), ("PG", r"\bPG\b|perfect grade"), ("MG", r"\b
           ("EG", r"\bEG\b|entry grade"), ("Figura", r"figure|figura|gff|gundam fix")]
 UA = {"User-Agent": "Mozilla/5.0 (compatible; GundamFeedBot/1.0; uso personal)"}
 DATA = Path("data"); DATA.mkdir(exist_ok=True)
+USED = {}  # fuente realmente usada por cada tienda en esta ejecución
 BASELINE = "2000-01-01T00:00:00+00:00"  # fecha de los productos ya existentes al empezar a seguir una tienda
 
 def grade(title):
@@ -77,6 +79,7 @@ def scrape_shopify(s):
                         "status": shopify_status(p, v), "in_stock": any(x.get("available") for x in v),
                         "image": p["images"][0]["src"] if p.get("images") else "",
                         "url": f"{s['base']}/products/{p['handle']}"})
+    USED[s['name']] = 'shopify'
     return out
 
 CARD_SELECTORS = ["article.product-miniature", "li.product", ".product-miniature", ".ajax_block_product",
@@ -164,9 +167,22 @@ def gundam_candidates(s):
         found.add((0 if re.search(r"maqueta|model|gunpla|kit", blob, re.I) else 1, len(url), url))
     return [u for _, _, u in sorted(found)][:4]
 
+NEXT_TXT = {"siguiente", "next", "›", "»", "siguiente »", "next »", "siguiente ›", "next ›", ">"}
+
+def next_link(soup, cur=1):
+    n = soup.select_one('a[rel=next], link[rel=next], a.next, li.next a, a[aria-label*="next" i], a[aria-label*="siguiente" i]')
+    cands = [n] if n else [a for a in soup.select("a[href]") if a.get_text(" ", strip=True).lower() in NEXT_TXT]
+    for a in cands:
+        h = a.get("href", "")
+        if h and not h.startswith(("#", "javascript")): return a
+    for a in soup.select("a[href]"):  # paginador numérico: enlace con el número de la página siguiente
+        h = a.get("href", "")
+        if a.get_text(strip=True) == str(cur + 1) and h and not h.startswith(("#", "javascript")): return a
+    return None
+
 def crawl(s, url):
     out, seen = [], set()
-    for page in range(15):
+    for page in range(40):
         r = get(url); soup = BeautifulSoup(r.text, "html.parser")
         items, sel = parse_cards(soup, s)
         fresh = [p for p in items if p["id"] not in seen]
@@ -176,7 +192,7 @@ def crawl(s, url):
         if not fresh: break
         print(f"   {s['name']}: página {page + 1} -> {len(fresh)} productos nuevos") if os.getenv("DEBUG_PAGES") else None
         seen.update(p["id"] for p in fresh); out += fresh
-        nxt = soup.select_one("a[rel=next], link[rel=next], a.next, li.next a")
+        nxt = next_link(soup, page + 1)
         if not nxt or not nxt.get("href"): break
         url = requests.compat.urljoin(url, nxt["href"])
     return out
@@ -190,7 +206,7 @@ def scrape_auto(s):
     return scrape_html(s)
 
 def scrape_html(s):
-    if s.get("url"): cands = [(s["url"], False)]
+    if s.get("url"): cands = [(s["url"], bool(re.search(r"[?&](s|q|search|texto|mot_q)=", s["url"])))]
     else:
         cands = []
         try: cands = [(u, False) for u in gundam_candidates(s)]
@@ -200,7 +216,7 @@ def scrape_html(s):
         try: items = crawl(s, url)
         except requests.RequestException: continue
         if is_search: items = [p for p in items if KEYWORDS.search(p["title"])]
-        if items: print(f"AUTO url {s['name']}: {url}"); return items
+        if items: print(f"AUTO url {s['name']}: {url}"); USED[s["name"]] = url; return items
     return []
 
 def telegram(text):
@@ -235,6 +251,7 @@ def main():
     old_data = json.loads(f.read_text()) if f.exists() else {}
     prev = {p["id"]: p for p in old_data.get("products", [])}
     counts = dict(old_data.get("counts", {}))
+    sources = dict(old_data.get("sources", {}))
     known_stores = {p["store"] for p in prev.values()}
     current, new, restock, notes, errors = {}, [], [], {}, []
     runners = {"shopify": scrape_shopify, "auto": scrape_auto}
@@ -243,21 +260,26 @@ def main():
         try:
             items = runners.get(s["type"], scrape_html)(s)
             items = [p for p in items if keep(p)]
+            rev = s.get("rev", 1)
+            sig = f"{rev}|{USED.get(s['name'], s.get('url', s['type']))}"
+            stored = sources.get(s["name"])
+            rebase = (stored is not None and stored != sig) or (stored is None and rev > 1 and s["name"] in known_stores)
             n0 = counts.get(s["name"], 0)
-            if n0 >= 20 and len(items) < 0.7 * n0:
+            if not rebase and n0 >= 20 and len(items) < 0.7 * n0:
                 raise RuntimeError(f"solo {len(items)} productos frente a {n0} la vez anterior: lectura incompleta, se conservan los datos anteriores")
             if not items: raise RuntimeError("0 productos (¿cambió la web o el selector?)")
-            print(f"OK  {s['name']}: {len(items)}"); counts[s["name"]] = len(items)
+            print(f"OK  {s['name']}: {len(items)}" + ("  (fuente cambiada: lectura inicial, sin avisos)" if rebase else "")); counts[s["name"]] = len(items); sources[s["name"]] = sig
         except Exception as e:
             print(f"ERR {s['name']}: {e}", file=sys.stderr); errors.append(s["name"])
             current.update({k: v for k, v in prev.items() if v["store"] == s["name"] and keep(v)}); continue
+        first_read = s["name"] not in known_stores or rebase
         ids = set()
         for p in items:
             ids.add(p["id"]); old = prev.get(p["id"])
-            p["first_seen"] = old["first_seen"] if old else (now if s["name"] in known_stores else BASELINE)
+            p["first_seen"] = old["first_seen"] if old else (BASELINE if first_read else now)
             p["restocked_at"] = old.get("restocked_at") if old else None
             current[p["id"]] = p
-            if s["name"] not in known_stores: continue  # primera lectura de una tienda: no avisar
+            if first_read: continue  # primera lectura (o fuente nueva) de una tienda: no avisar
             if not old: new.append(p); continue
             before = old.get("status") or ("stock" if old.get("in_stock") else "out")
             if (before == "out" and p["status"] in ("stock", "preorder")) or (before == "preorder" and p["status"] == "stock"):
@@ -270,7 +292,7 @@ def main():
 
     prods = sorted(current.values(), key=lambda p: p["first_seen"], reverse=True)
     for p in prods: p["grade"] = grade(p["title"])
-    f.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "products": prods}, ensure_ascii=False))
+    f.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "products": prods}, ensure_ascii=False))
 
     items = "".join(f"<item><title>{escape(p['title'])} ({p['price']:.2f} €, {escape(p['store'])})</title>"
                     f"<link>{escape(p['url'])}</link><guid>{escape(p['id'])}</guid>"
