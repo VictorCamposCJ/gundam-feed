@@ -37,7 +37,7 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
 .card h3{font:600 1rem/1.25 Barlow,sans-serif;margin:0;flex:1}
 .card .pr{font:700 1.3rem "Barlow Condensed",sans-serif}
 .card .st{color:var(--mute);font-size:.88rem}
-.out{opacity:.55}.out .st b{color:var(--red)}.in .st b{color:#1d8a4a}.pre .st b{color:var(--amber)}
+.out{opacity:.55}.out .st b{color:var(--red)}.in .st b{color:#1d8a4a}.pre .st b{color:var(--amber)}.unv .st b{color:var(--mute)}
 .card .tag.re{background:var(--blue);color:#fff}
 .tabs{flex-basis:100%;gap:8px}
 .tab{font-size:1.1rem;padding:6px 16px}
@@ -74,9 +74,9 @@ const $ = id => document.getElementById(id);
 let all = [], gradeSel = new Set(), tab = 'all';
 const eur = n => n ? n.toLocaleString('es-ES',{style:'currency',currency:'EUR'}) : 'Consultar';
 const DAY = 864e5, NEW_MS = 7*DAY, RE_MS = 14*DAY;
-const status = p => p.status || (p.in_stock ? 'stock' : 'out');
-const LABEL = {stock:'En stock', preorder:'Preorder', out:'Agotado'};
-const CLS = {stock:'in', preorder:'pre', out:'out'};
+const status = p => p.unverified ? 'unverified' : (p.status || (p.in_stock ? 'stock' : 'out'));
+const LABEL = {stock:'En stock', preorder:'Preorder', out:'Agotado', unverified:'Stock sin verificar'};
+const CLS = {stock:'in', preorder:'pre', out:'out', unverified:'unv'};
 
 Promise.all([fetch('data/productos.json?'+Date.now()).then(r=>r.json()), fetch('data/estado.json?'+Date.now()).then(r=>r.json()).catch(()=>({}))]).then(([d,e])=>{
   all = d.products;
