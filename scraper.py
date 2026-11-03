@@ -22,11 +22,11 @@ STORES = [
     {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "html", "url": "https://www.pixelatoy.com/es/334-gunpla"},
     {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
-    {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?licencias%5B%5D=113", "stock_url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 3},
+    {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/", "stock_url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "max_paginas": 120, "rev": 3},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "url": "https://gunplaloompa.com/model-kits-3/", "stock_url": "https://gunplaloompa.com/model-kits-3/?q=Disponibilidad-En+stock", "solo_gundam": True, "pausa": 3, "max_paginas": 150, "completa_cada_h": 6, "rev": 3},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "rev": 3},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
@@ -103,15 +103,25 @@ def robots_allows(url):
             best = (len(pat), allow)
     return True if best is None else best[1]
 
-def get(url, **kw):
+_PAUSE = {}  # dominio -> pausa mínima tras recibir un 429
+
+def get(url, pause=1.5, **kw):
     if RESPECT_ROBOTS and not robots_allows(url):
         print(f"   robots.txt no permite leer: {url}")
         raise RobotsBlocked(url)
+    host = urlparse(url).netloc
     last = None
-    for i in range(3):
-        time.sleep(1.5)
+    for i in range(4):
+        time.sleep(max(pause, _PAUSE.get(host, 0)))
         try:
-            r = requests.get(url, headers=UA, timeout=40, **kw); r.raise_for_status(); return r
+            r = requests.get(url, headers=UA, timeout=40, **kw)
+            if r.status_code == 429:  # la tienda pide ir más despacio: se respeta
+                ra = r.headers.get("Retry-After", "")
+                wait = min(int(ra), 180) if ra.isdigit() else 30 * (i + 1)
+                _PAUSE[host] = min(max(pause, _PAUSE.get(host, 0)) * 2, 12)
+                print(f"   {host}: demasiadas peticiones (429); espero {wait} s y bajo el ritmo a 1 cada {_PAUSE[host]:.0f} s")
+                time.sleep(wait); last = requests.HTTPError("429 Too Many Requests"); continue
+            r.raise_for_status(); return r
         except requests.RequestException as e:
             last = e
             if getattr(getattr(e, "response", None), "status_code", 0) in (403, 404): break
@@ -256,9 +266,9 @@ def crawl(s, url):
     En config se puede forzar con "paginar": "param:nombre" o "path"."""
     first, out, seen, pages = url, [], set(), 0
     style = parse_style(s.get("paginar"))
-    limit = int(s.get("max_paginas", 40))
+    limit = int(s.get("max_paginas", 40)); pause = float(s.get("pausa", 1.5))
     for page in range(limit):
-        r = get(url); soup = BeautifulSoup(r.text, "html.parser")
+        r = get(url, pause=pause); soup = BeautifulSoup(r.text, "html.parser")
         items, sel = parse_cards(soup, s)
         fresh = [p for p in items if p["id"] not in seen]
         if page == 0 and not items:
@@ -272,7 +282,7 @@ def crawl(s, url):
         if page == 0 and len(fresh) >= 6:  # sin enlace "siguiente": probar patrones habituales de paginación
             for st in PAGE_STYLES:
                 cand = page_url(first, 2, st)
-                try: items2, _ = parse_cards(BeautifulSoup(get(cand).text, "html.parser"), s)
+                try: items2, _ = parse_cards(BeautifulSoup(get(cand, pause=pause).text, "html.parser"), s)
                 except requests.RequestException: continue
                 if any(p["id"] not in seen for p in items2):
                     style, url = st, cand
@@ -299,7 +309,9 @@ def ficha_status(page_html):
 def apply_stock_list(s, items):
     """Tiendas con filtro 'ocultar agotados' (stock_url): lo que sale en la lista filtrada tiene stock; lo demás, no."""
     filtered = crawl(s, s["stock_url"])
-    in_stock = {p["id"] for p in filtered}
+    if s.get("solo_gundam"): filtered = [p for p in filtered if GUNDAM_RX.search(p["title"])]
+    fmap = {p["id"]: p for p in filtered}
+    in_stock = set(fmap)
     ids = {p["id"] for p in items}
     if not in_stock: raise RuntimeError("la lista filtrada por stock salió vacía")
     if len(in_stock) >= 0.98 * len(ids): raise RuntimeError("el filtro de stock no filtra nada (misma cantidad que la lista completa)")
@@ -309,7 +321,9 @@ def apply_stock_list(s, items):
     items.extend(extra)
     n_out = 0
     for p in items:
-        if p["id"] in in_stock: p["status"] = "preorder" if p["status"] == "preorder" else "stock"
+        if p["id"] in in_stock:
+            f = fmap[p["id"]]; p["price"], p["title"], p["url"] = f["price"], f["title"], f["url"]; p["image"] = f["image"] or p.get("image", "")
+            p["status"] = "preorder" if (p["status"] == "preorder" or f["status"] == "preorder") else "stock"
         elif p["status"] == "preorder": pass  # no sale en la lista con stock, pero su tarjeta indica preventa
         else: p["status"] = "out"; n_out += 1
         p["in_stock"] = p["status"] != "out"
@@ -454,10 +468,24 @@ def main():
     current, new, restock, notes, errors = {}, [], [], {}, []
     runners = {"shopify": scrape_shopify, "auto": scrape_auto, "woo": scrape_woo}
 
+    full_info = dict(old_e.get("full", {})); full_done = {}
+    def cache_fresh(s):
+        """True si la lista completa de esta tienda se leyó hace menos de 'completa_cada_h' horas."""
+        h, info = s.get("completa_cada_h"), full_info.get(s["name"])
+        if not (h and s.get("stock_url") and info and info.get("rev") == s.get("rev", 1)): return False
+        if not any(p["store"] == s["name"] for p in prev.values()): return False
+        return (datetime.fromisoformat(now) - datetime.fromisoformat(info["at"])).total_seconds() / 3600 < h
+
     def read_store(s):
         try:
-            items = runners.get(s["type"], scrape_html)(s)
-            if s.get("stock_url") and items: apply_stock_list(s, items)
+            if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
+                items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
+                apply_stock_list(s, items)
+                print(f"   {s['name']}: lista completa en caché (< {s['completa_cada_h']} h); solo se ha leído la lista con stock")
+            else:
+                items = runners.get(s["type"], scrape_html)(s)
+                if s.get("stock_url") and items: apply_stock_list(s, items)
+                if s.get("completa_cada_h") and items: full_done[s["name"]] = {"at": now, "rev": s.get("rev", 1)}
             if s.get("fichas") and items: verify_fichas(s, items, prev, now, watch0)
             return s, items, None
         except Exception as e: return s, None, e
@@ -480,6 +508,7 @@ def main():
             grew = not rebase and n0 >= 10 and len(items) > 1.5 * n0 + 10  # p. ej. se arregló la paginación
             rebase = rebase or grew
             print(f"OK  {s['name']}: {len(items)}" + ("  (fuente cambiada: lectura inicial, sin avisos)" if changed else f"  (crecimiento brusco de {n0} a {len(items)}: lectura inicial, sin avisos)" if grew else "")); counts[s["name"]] = len(items); sources[s["name"]] = sig
+            if s["name"] in full_done: full_info[s["name"]] = full_done[s["name"]]
         except Exception as e:
             print(f"ERR {s['name']}: {e}", file=sys.stderr); errors.append(s["name"])
             current.update({k: v for k, v in prev.items() if v["store"] == s["name"] and keep(v)}); continue
@@ -506,7 +535,7 @@ def main():
     def write_if_changed(path, text):
         if not path.exists() or path.read_text() != text: path.write_text(text)
     write_if_changed(f, json.dumps({"products": prods}, ensure_ascii=False))  # solo cambia si cambian los productos
-    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources}, ensure_ascii=False))
+    est.write_text(json.dumps({"updated": now, "errors": errors, "counts": counts, "sources": sources, "full": full_info}, ensure_ascii=False))
 
     items = "".join(f"<item><title>{escape(p['title'])} ({p['price']:.2f} €, {escape(p['store'])})</title>"
                     f"<link>{escape(p['url'])}</link><guid>{escape(p['id'])}</guid>"
