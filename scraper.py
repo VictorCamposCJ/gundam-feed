@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "sin_stock": True, "intervalo_h": 6, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 7},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "ps_json": True, "paginar": "param:page", "quickview": 25, "pausa_qv": 4, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 9},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -115,7 +115,7 @@ class RateLimited(requests.RequestException):
 class TimeBudget(requests.RequestException):
     pass
 
-def get(url, pause=1.5, **kw):
+def get(url, pause=1.5, headers=None, data=None, **kw):
     if RESPECT_ROBOTS and not robots_allows(url):
         print(f"   robots.txt no permite leer: {url}")
         raise RobotsBlocked(url)
@@ -130,7 +130,8 @@ def get(url, pause=1.5, **kw):
         over()
         time.sleep(max(pause, _PAUSE.get(host, 0)))
         try:
-            r = requests.get(url, headers=UA, timeout=40, **kw)
+            r = (requests.post(url, headers={**UA, **(headers or {})}, data=data, timeout=40, **kw) if data is not None
+                 else requests.get(url, headers={**UA, **(headers or {})}, timeout=40, **kw))
             if r.status_code == 429:  # la tienda pide ir más despacio: se respeta
                 if host not in _DIAG:
                     _DIAG.add(host)
@@ -229,7 +230,11 @@ def parse_cards(soup, s):
             if not title: continue
             pr = c.select_one("[itemprop=price], .price ins .amount, .price .amount, .price, .product-price")
             raw = (pr.get("content") or pr.get_text(" ")) if pr else ""
-            out.append(make(s, a, title, raw, card_text(c), img, card_classes(c)))
+            item = make(s, a, title, raw, card_text(c), img, card_classes(c))
+            el = c if c.get("data-id-product") else c.select_one("[data-id-product]")
+            if el is not None and str(el.get("data-id-product", "")).isdigit():
+                item["pid"] = int(el["data-id-product"]); item["pida"] = int(el.get("data-id-product-attribute") or 0) if str(el.get("data-id-product-attribute") or "0").isdigit() else 0
+            out.append(item)
         if out: return out, sel
     return parse_generic(soup, s), "generic"
 
@@ -277,6 +282,46 @@ def next_link(soup, cur=1):
         if a.get_text(strip=True) == str(cur + 1) and h and not h.startswith(("#", "javascript")): return a
     return None
 
+JSON_HEADERS = {"Accept": "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest"}  # las mismas que usa la propia web de la tienda
+
+def parse_ps_json(r, s):
+    """PrestaShop 1.7: el listado AJAX trae JSON con 'products' (incluye availability). Si no, se usa el HTML que haya y el stock queda sin verificar."""
+    try: data = r.json()
+    except ValueError: data = None
+    prods = data.get("products") if isinstance(data, dict) else None
+    out = []
+    if isinstance(prods, list) and prods:
+        if ("ps", s["name"]) not in _DIAG:
+            _DIAG.add(("ps", s["name"])); p0 = prods[0]
+            print(f"   {s['name']}: listado JSON de PrestaShop · campos: {sorted(p0)[:45]} · availability={p0.get('availability')!r} "
+                  f"quantity={p0.get('quantity')!r} message={p0.get('availability_message')!r}")
+        for p in prods:
+            url = urljoin(s["base"], p.get("url") or p.get("link") or "")
+            name = html.unescape(str(p.get("name") or "")).strip()
+            if not url or not name: continue
+            avail, qty, msg = p.get("availability"), p.get("quantity"), str(p.get("availability_message") or "")
+            known = avail in ("available", "unavailable", "last_remaining_items") or isinstance(qty, (int, float))
+            if avail == "unavailable" or SOLD.search(msg) or (isinstance(qty, (int, float)) and qty <= 0 and not p.get("allow_oosp")): st = "out"
+            elif PREORDER.search(f"{name} {msg}"): st = "preorder"
+            else: st = "stock"
+            cover = p.get("cover") or {}
+            img = ((cover.get("bySize") or {}).get("home_default") or {}).get("url") or (cover.get("large") or {}).get("url") or (cover.get("medium") or {}).get("url") or ""
+            price = p.get("price_amount")
+            item = {"id": f"{s['name']}:{url}", "store": s["name"], "title": name, "price": float(price) if isinstance(price, (int, float)) else to_price(str(p.get("price") or "")),
+                    "status": st, "in_stock": st != "out", "image": img, "url": url}
+            if not known: item["unverified"] = True
+            if isinstance(p.get("id_product"), int): item["pid"] = p["id_product"]; item["pida"] = p.get("id_product_attribute") if isinstance(p.get("id_product_attribute"), int) else 0
+            out.append(item)
+        return out
+    html_frag = data.get("rendered_products") if isinstance(data, dict) else None
+    soup = BeautifulSoup(html_frag if html_frag else r.text, "html.parser")
+    out, _ = parse_cards(soup, s)
+    for p in out:
+        if p["status"] != "out": p["unverified"] = True  # sin datos de disponibilidad en la respuesta
+    if ("psf", s["name"]) not in _DIAG:
+        _DIAG.add(("psf", s["name"])); print(f"   {s['name']}: la tienda no devolvió JSON con productos; se usa el HTML y el stock queda sin verificar")
+    return out
+
 PAGE_STYLES = [("param", "page"), ("param", "p"), ("param", "pagina"), ("param", "paged"), ("path", None)]
 
 def parse_style(txt):
@@ -298,8 +343,8 @@ def crawl(s, url):
     style = parse_style(s.get("paginar"))
     limit = int(s.get("max_paginas", 40)); pause = float(s.get("pausa", 1.5))
     for page in range(limit):
-        r = get(url, pause=pause); soup = BeautifulSoup(r.text, "html.parser")
-        items, sel = parse_cards(soup, s)
+        r = get(url, pause=pause, headers=JSON_HEADERS if s.get("ps_json") else None); soup = BeautifulSoup(r.text, "html.parser")
+        items = parse_ps_json(r, s) if s.get("ps_json") else parse_cards(soup, s)[0]
         fresh = [p for p in items if p["id"] not in seen]
         if page == 0 and not items:
             print(f"   {s['name']}: sin productos en {url} · título: {soup.title.string.strip() if soup.title and soup.title.string else '?'}"
@@ -373,26 +418,51 @@ def mark_unverified(items, prev):
         if old and old.get("sv"): p["status"], p["in_stock"], p["sv"] = old["status"], old["status"] != "out", True
         elif p["status"] != "out": p["unverified"] = True
 
-def verify_fichas(s, items, prev, now, watch=()):
-    """El listado de esta tienda no indica el stock: se abren fichas, máximo s['fichas'] por pasada.
-    Prioridad: sin verificar -> agotados (por si se reponen) -> el resto, de la comprobación más antigua a la más reciente."""
-    for p in items:
-        old = prev.get(p["id"])
-        if p["status"] == "out": p["checked_at"] = now  # el propio listado lo marca agotado: es fiable
-        elif old and old.get("checked_at"):             # conservar lo ya verificado hasta volver a comprobarlo
-            p["status"], p["in_stock"], p["checked_at"] = old["status"], old["status"] != "out", old["checked_at"]
-    budget = int(s["fichas"])
-    hot = [p for p in items if watch and matches(p["title"], watch)][:budget]  # tu lista de vigilancia: se comprueba en CADA pasada
+def quickview_status(s, p):
+    """PrestaShop: 'Vista rápida' de la propia tienda (POST a index.php?controller=product). Devuelve out / stock / preorder o None."""
+    if p.get("pid") is None: return None
+    r = get(f"{s['base']}/index.php?controller=product", pause=float(s.get("pausa_qv", 4)), headers=JSON_HEADERS,
+            data={"action": "quickview", "id_product": p["pid"], "id_product_attribute": p.get("pida", 0)})
+    try: data = r.json()
+    except ValueError: data = None
+    qv = data.get("quickview_html") if isinstance(data, dict) else None
+    if not qv:
+        if ("qv", s["name"]) not in _DIAG: _DIAG.add(("qv", s["name"])); print(f"   {s['name']}: la Vista rápida no devolvió quickview_html (respuesta: {r.text[:100]!r})")
+        return None
+    soup = BeautifulSoup(qv, "html.parser")
+    link = soup.select_one('link[itemprop="availability"]'); href = (link.get("href") if link else "") or ""
+    av = soup.select_one("#product-availability"); txt = av.get_text(" ", strip=True) if av else ""
+    btn = soup.select_one("button.add-to-cart")
+    if href.endswith(("OutOfStock", "SoldOut")) or SOLD.search(txt) or (btn is not None and btn.has_attr("disabled")): return "out"
+    if href.endswith(("PreOrder", "BackOrder")) or PREORDER.search(txt): return "preorder"
+    return "stock" if (href.endswith("InStock") or av is not None or btn is not None) else None
+
+def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True):
+    """El listado no indica (o no basta para saber) el stock: se consulta producto a producto, máximo s['fichas'] / s['quickview'] por pasada.
+    Prioridad: tu lista de vigilancia -> sin verificar -> agotados (por si se reponen) -> el resto, de la comprobación más antigua a la más reciente.
+    Devuelve True si la tienda pidió ir más despacio (429) y se interrumpió."""
+    if fresh:
+        for p in items:
+            old = prev.get(p["id"])
+            if p["status"] == "out" or (s.get("ps_json") and not p.get("unverified")): p["checked_at"] = now  # el propio listado ya lo indica
+            elif old and old.get("checked_at"):                                                                  # conservar lo ya verificado
+                p["status"], p["in_stock"], p["checked_at"] = old["status"], old["status"] != "out", old["checked_at"]
+    budget = int(s.get("fichas") or s.get("quickview") or 0) if check else 0
+    pool = [p for p in items if p.get("checked_at") != now]  # lo verificado en esta misma pasada no se vuelve a pedir
+    hot = [p for p in pool if watch and matches(p["title"], watch)][:budget]
     hot_ids = {p["id"] for p in hot}
-    rest = [p for p in items if p["id"] not in hot_ids]
+    rest = [p for p in pool if p["id"] not in hot_ids]
     unv = [p for p in rest if not p.get("checked_at")]
     out = sorted([p for p in rest if p.get("checked_at") and p["status"] == "out"], key=lambda p: p["checked_at"])
     ok = sorted([p for p in rest if p.get("checked_at") and p["status"] != "out"], key=lambda p: p["checked_at"])
     n_out = min(len(out), (budget - len(hot)) // 3)
     chosen = hot + out[:n_out]; chosen += unv[:budget - len(chosen)]; chosen += ok[:budget - len(chosen)]; chosen += out[n_out:][:budget - len(chosen)]
-    checked = changed = 0
+    fetch = (lambda p: quickview_status(s, p)) if s.get("quickview") else (lambda p: ficha_status(get(p["url"]).text))
+    checked = changed = 0; limited = False
     for p in chosen:
-        try: st = ficha_status(get(p["url"]).text)
+        try: st = fetch(p)
+        except (RateLimited, TimeBudget) as e:
+            limited = True; print(f"   {s['name']}: se interrumpe la verificación de productos ({type(e).__name__})"); break
         except requests.RequestException: continue
         if st is None: continue
         checked += 1; changed += st != p["status"]
@@ -401,7 +471,8 @@ def verify_fichas(s, items, prev, now, watch=()):
         if p.get("checked_at"): p.pop("unverified", None)
         else: p["unverified"] = True
     pend = sum(1 for p in items if p.get("unverified"))
-    print(f"   {s['name']}: {checked} fichas comprobadas, {changed} con estado distinto al del listado; sin verificar aún: {pend} de {len(items)}")
+    print(f"   {s['name']}: {checked} productos comprobados, {changed} con estado distinto; sin verificar aún: {pend} de {len(items)}")
+    return limited
 
 def scrape_woo(s):
     """WooCommerce: API pública de productos. Si no está disponible, se usa la página HTML (url / fallback)."""
@@ -522,7 +593,7 @@ def main():
     runners = {"shopify": scrape_shopify, "auto": scrape_auto, "woo": scrape_woo}
 
     full_info = dict(old_e.get("full", {})); full_done = {}
-    cooldown = dict(old_e.get("pausa_hasta", {}))
+    cooldown = dict(old_e.get("pausa_hasta", {})); qv_limited = set()
     last_read = dict(old_e.get("leido", {}))
     def cache_fresh(s):
         """True si la lista completa de esta tienda se leyó hace menos de 'completa_cada_h' horas."""
@@ -540,7 +611,10 @@ def main():
             if h and last_read.get(s["name"]) and any(p["store"] == s["name"] for p in prev.values()) \
                and (datetime.fromisoformat(now) - datetime.fromisoformat(last_read[s["name"]])).total_seconds() / 3600 < h:
                 print(f"   {s['name']}: leída hace menos de {h} h; se conservan los datos")
-                return s, [dict(p) for p in prev.values() if p["store"] == s["name"]], None
+                items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
+                if (s.get("fichas") or s.get("quickview")) and items:
+                    if verify_fichas(s, items, prev, now, watch0, fresh=False, check=cooldown.get(f"{s['name']}#qv", "") <= now): qv_limited.add(s["name"])
+                return s, items, None
             if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
                 filtered = read_filtered(s)
                 if filtered is None: raise RuntimeError("no se pudo leer la lista con stock; se conservan los datos anteriores")
@@ -557,7 +631,8 @@ def main():
             if s.get("sin_stock") and items:  # no hay forma permitida de leer su stock: se muestra como 'sin verificar'
                 for p in items:
                     if p["status"] != "out": p["unverified"] = True
-            if s.get("fichas") and items: verify_fichas(s, items, prev, now, watch0)
+            if (s.get("fichas") or s.get("quickview")) and items:
+                if verify_fichas(s, items, prev, now, watch0, check=cooldown.get(f"{s['name']}#qv", "") <= now): qv_limited.add(s["name"])
             return s, items, None
         except Exception as e: return s, None, e
     with ThreadPoolExecutor(max_workers=len(STORES)) as ex:  # todas las tiendas a la vez; cada una mantiene su ritmo
@@ -568,6 +643,8 @@ def main():
         if err is None and items: continue
         hours = 3 if host in _LIMITED else 6 if host in _BLOCKED else 0
         if hours: cooldown[f"{s['name']}#{s.get('rev', 1)}"] = (datetime.fromisoformat(now) + timedelta(hours=hours)).isoformat(timespec="seconds")
+    for name in qv_limited:  # la tienda pidió ir más despacio durante la verificación: se para esa parte 3 h
+        cooldown[f"{name}#qv"] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
     cooldown = {k: v for k, v in cooldown.items() if v > now}
 
     for s, items, err in results:
