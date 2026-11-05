@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from xml.sax.saxutils import escape
 import requests
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, urljoin
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, urljoin, quote_plus
 from bs4 import BeautifulSoup
 
 # type: "shopify" (usa /products.json) o "prestashop" (HTML, selectores habituales).
@@ -17,14 +17,14 @@ STORES = [
     {"name": "Robotines",    "base": "https://www.robotines.com",     "type": "html", "url": "https://www.robotines.com/es/35-maquetas-gundam"},
     {"name": "Lost Bunker",  "base": "https://lostbunker.com",        "type": "shopify"},
     {"name": "La Escotilla", "base": "https://laescotillajuegos.com", "type": "shopify"},
-    {"name": "Gold Saucer",  "base": "https://goldsaucerstore.es",    "type": "html", "url": "https://goldsaucerstore.es/60-model-kits-gundam"},
+    {"name": "Gold Saucer", "base": "https://goldsaucerstore.es", "type": "html", "buscar_url": "https://goldsaucerstore.es/index.php?controller=search&s={q}", "pausa": 3, "rev": 2},
     {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",    "type": "html", "url": "https://www.1001hobbies.es/26736-gunpla"},
     {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "html", "url": "https://www.pixelatoy.com/es/334-gunpla"},
     {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 25, "pausa_qv": 4, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 10},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 4, "pausa_qv": 95, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 16, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -351,6 +351,7 @@ def crawl(s, url):
                   f" · '€' en HTML: {r.text.count('€')} · ld+json: {'ld+json' in r.text} · bytes: {len(r.text)}")
         if not fresh: break
         seen.update(p["id"] for p in fresh); out += fresh; pages += 1
+        if limit <= 1: break
         if style: url = page_url(first, page + 2, style); continue
         nxt = next_link(soup, page + 1)
         if nxt: url = urljoin(url, nxt["href"]); continue
@@ -365,7 +366,7 @@ def crawl(s, url):
                     break
             if style: continue
         break
-    print(f"   {s['name']}: {pages} página(s) leída(s)" + (f" · LÍMITE de {limit} alcanzado: puede haber más productos; sube max_paginas" if pages >= limit else ""))
+    print(f"   {s['name']}: {pages} página(s) leída(s)" + (f" · LÍMITE de {limit} alcanzado: puede haber más productos; sube max_paginas" if limit > 1 and pages >= limit else ""))
     return out
 
 def ficha_status(page_html):
@@ -641,6 +642,22 @@ def main():
         try:
             ck = f"{s['name']}#{s.get('rev', 1)}"
             if cooldown.get(ck, "") > now: raise RuntimeError(f"en pausa hasta {cooldown[ck]} por un rechazo anterior de la tienda (429 o 403); no se insiste")
+            if s.get("buscar_url"):  # solo se consulta lo que vigilas: una búsqueda por cada entrada de tu lista
+                items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
+                by_id = {p["id"]: p for p in items}; refreshed = set()
+                for entry in watch0:
+                    for p in crawl({**s, "max_paginas": 1}, s["buscar_url"].format(q=quote_plus(entry))):
+                        if not matches(p["title"], [entry]): continue
+                        old = by_id.get(p["id"])
+                        if old: old.update({k: p[k] for k in ("title", "price", "image", "url", "status", "in_stock")})
+                        else: items.append(p); by_id[p["id"]] = p
+                        refreshed.add(p["id"])
+                for p in items:  # lo que no se ha vuelto a consultar ya no tiene el estado al día
+                    if p["id"] in refreshed: p.pop("unverified", None)
+                    elif p["status"] != "out": p["unverified"] = True
+                print(f"   {s['name']}: {len(watch0)} búsquedas de tu lista; {len(refreshed)} productos actualizados"
+                      + ("" if watch0 else " (tu lista de vigilancia está vacía: no se consulta nada)"))
+                return s, items, None
             h = s.get("intervalo_h")
             if h and last_read.get(s["name"]) and str(sources.get(s["name"], "")).split("|")[0] == str(s.get("rev", 1)) \
                and any(p["store"] == s["name"] for p in prev.values()) \
