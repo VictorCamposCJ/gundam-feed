@@ -1,9 +1,13 @@
 name: Actualizar productos
 on:
+  # Cada 30 minutos, todo el día (con el repositorio público los minutos de Actions son gratis).
+  # Si lo pasas a privado, calcula antes los minutos: cada hora serían "0 * * * *".
   schedule: [{cron: "*/30 * * * *"}]
   workflow_dispatch:
 permissions:
   contents: write
+  pages: write
+  id-token: write
 concurrency:
   group: scrape
   cancel-in-progress: false
@@ -11,8 +15,19 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Preparar la carpeta docs/ (migración única)
+        run: |
+          mkdir -p docs
+          # desde la raíz del repositorio o desde una carpeta public/ anterior
+          if [ -d data ] && [ ! -d docs/data ]; then git mv data docs/data; fi
+          if [ -d public/data ] && [ ! -d docs/data ]; then git mv public/data docs/data; fi
+          if [ -f index.html ] && [ ! -f docs/index.html ]; then git mv index.html docs/index.html; fi
+          if [ -f public/index.html ] && [ ! -f docs/index.html ]; then git mv public/index.html docs/index.html; fi
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install requests beautifulsoup4
@@ -25,6 +40,13 @@ jobs:
           WATCH: ${{ vars.WATCH }}
       - name: Guardar datos
         run: |
-          git config user.name "gundam-bot"; git config user.email "bot@users.noreply.github.com"
-          git add data
+          git config user.name "${{ vars.GIT_NAME || github.repository_owner }}"
+          git config user.email "${{ vars.GIT_EMAIL || format('{0}+{1}@users.noreply.github.com', github.repository_owner_id, github.repository_owner) }}"
+          git add -A docs
           git diff --staged --quiet || (git commit -m "datos $(date -u +%F\ %H:%M)" && git pull --rebase -q && git push)
+      # La web se publica aquí mismo (solo la carpeta docs/), sin la publicación aparte de Pages, que también gastaría minutos
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4
