@@ -1,7 +1,7 @@
 {
   "avisar_novedades": true,
   "avisar_reposiciones": true,
-  "avisar_preorders": true,
+  "avisar_preorders": false,
   "solo_lista_vigilancia": false,
   "vigilar": [],
   "ignorar": [],
