@@ -3,7 +3,7 @@
   "avisar_reposiciones": true,
   "avisar_preorders": true,
   "solo_lista_vigilancia": false,
-  "vigilar": ["rg sazabi", "hg schwarzette"],
+  "vigilar": [],
   "ignorar": [],
   "respetar_robots": false
 }
