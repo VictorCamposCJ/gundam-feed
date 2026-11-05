@@ -24,7 +24,7 @@ STORES = [
     {"name": "Impact Store", "base": "https://impactstore.es", "type": "woo", "url": "https://impactstore.es/?s=gundam&post_type=product&dgwt_wcas=1", "rev": 3},
     {"name": "Kurogami", "base": "https://kurogami.com", "type": "html", "url": "https://kurogami.com/es/familia/figuras-bandai?tipo_stock=en_stock&licencias%5B%5D=113", "rev": 4},
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
-    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "ps_json": True, "paginar": "param:page", "quickview": 25, "pausa_qv": 4, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 10},
+    {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 25, "pausa_qv": 4, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 14, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
     {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
@@ -48,7 +48,7 @@ GRADES = [("Accesorio", ACCESORIO), ("PG", r"\bPG\b|perfect grade"), ("MG", r"\b
           ("HG", r"\bHG\w*\b|high grade"), ("SD", r"\bSD\b|\bSDCS\b|super deformed"),
           ("EG", r"\bEG\b|entry grade"), ("Figura", r"figure|figura|gff|gundam fix")]
 UA = {"User-Agent": "Mozilla/5.0 (compatible; GundamFeedBot/1.0; uso personal)"}
-DATA = Path("data"); DATA.mkdir(exist_ok=True)
+DATA = Path(os.getenv("DATA_DIR", "docs/data")); DATA.mkdir(parents=True, exist_ok=True)  # solo lo que hay en docs/ se publica en la web
 USED = {}  # fuente realmente usada por cada tienda en esta ejecución
 BASELINE = "2000-01-01T00:00:00+00:00"  # fecha de los productos ya existentes al empezar a seguir una tienda
 
@@ -418,11 +418,18 @@ def mark_unverified(items, prev):
         if old and old.get("sv"): p["status"], p["in_stock"], p["sv"] = old["status"], old["status"] != "out", True
         elif p["status"] != "out": p["unverified"] = True
 
+def ps_pid(p):
+    """Identificador de producto de PrestaShop: el que traiga la tarjeta o, si no, el número del final de su dirección (…-828.html)."""
+    if p.get("pid") is not None: return p["pid"]
+    m = re.search(r"-(\d+)\.html(?:[?#].*)?$", p.get("url", ""))
+    return int(m.group(1)) if m else None
+
 def quickview_status(s, p):
     """PrestaShop: 'Vista rápida' de la propia tienda (POST a index.php?controller=product). Devuelve out / stock / preorder o None."""
-    if p.get("pid") is None: return None
+    pid = ps_pid(p)
+    if pid is None: return None
     r = get(f"{s['base']}/index.php?controller=product", pause=float(s.get("pausa_qv", 4)), headers=JSON_HEADERS,
-            data={"action": "quickview", "id_product": p["pid"], "id_product_attribute": p.get("pida", 0)})
+            data={"action": "quickview", "id_product": pid, "id_product_attribute": p.get("pida", 0)})
     try: data = r.json()
     except ValueError: data = None
     qv = data.get("quickview_html") if isinstance(data, dict) else None
@@ -437,7 +444,32 @@ def quickview_status(s, p):
     if href.endswith(("PreOrder", "BackOrder")) or PREORDER.search(txt): return "preorder"
     return "stock" if (href.endswith("InStock") or av is not None or btn is not None) else None
 
-def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True):
+def read_portada(s):
+    """Portada de la tienda: productos de Gundam destacados o recién llegados (una sola petición). Devuelve la lista, o None si falla."""
+    try: r = get(s["portada"], pause=float(s.get("pausa", 1.5)))
+    except requests.RequestException as e:
+        print(f"   {s['name']}: no se pudo leer la portada ({type(e).__name__}: {str(e)[:80]})"); return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    found, seen = [], set()
+    for p in parse_cards(soup, s)[0] + parse_generic(soup, s):  # los de 'cards' traen su identificador; el lector genérico recoge el resto de bloques
+        if p["id"] in seen or not GUNDAM_RX.search(p["title"]) or not keep(p): continue
+        seen.add(p["id"]); found.append(p)
+    print(f"   {s['name']}: portada leída; {len(found)} productos de Gundam distintos")
+    return found
+
+def merge_portada(s, items, prev):
+    """Añade a los productos de la tienda los de la portada que no estén (p. ej. otras gamas). Devuelve los ids nuevos, que se verifican primero."""
+    ids = {p["id"] for p in items}
+    for p in prev.values():  # los que vinieron antes de la portada se conservan aunque ya no estén en ella
+        if p["store"] == s["name"] and p.get("src") == "portada" and p["id"] not in ids: items.append(dict(p)); ids.add(p["id"])
+    fresh = set()
+    for p in read_portada(s) or []:
+        if p["id"] not in ids:
+            p["src"] = "portada"; p["unverified"] = True; items.append(p); ids.add(p["id"]); fresh.add(p["id"])
+    if fresh: print(f"   {s['name']}: {len(fresh)} productos nuevos solo en la portada")
+    return fresh
+
+def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True, extra_hot=()):
     """El listado no indica (o no basta para saber) el stock: se consulta producto a producto, máximo s['fichas'] / s['quickview'] por pasada.
     Prioridad: tu lista de vigilancia -> sin verificar -> agotados (por si se reponen) -> el resto, de la comprobación más antigua a la más reciente.
     Devuelve True si la tienda pidió ir más despacio (429) y se interrumpió."""
@@ -448,10 +480,10 @@ def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True):
             elif old and old.get("checked_at"):                                                                  # conservar lo ya verificado
                 p["status"], p["in_stock"], p["checked_at"] = old["status"], old["status"] != "out", old["checked_at"]
     budget = int(s.get("fichas") or s.get("quickview") or 0) if check else 0
-    if s.get("quickview") and items and not any(p.get("pid") is not None for p in items) and ("nopid", s["name"]) not in _DIAG:
+    if s.get("quickview") and items and not any(ps_pid(p) is not None for p in items) and ("nopid", s["name"]) not in _DIAG:
         _DIAG.add(("nopid", s["name"])); print(f"   {s['name']}: ningún producto trae su identificador (data-id-product); sin él no se puede usar la Vista rápida")
     pool = [p for p in items if p.get("checked_at") != now]  # lo verificado en esta misma pasada no se vuelve a pedir
-    hot = [p for p in pool if watch and matches(p["title"], watch)][:budget]
+    hot = [p for p in pool if (watch and matches(p["title"], watch)) or p["id"] in extra_hot][:budget]  # tu lista y lo recién llegado, primero
     hot_ids = {p["id"] for p in hot}
     rest = [p for p in pool if p["id"] not in hot_ids]
     unv = [p for p in rest if not p.get("checked_at")]
@@ -615,8 +647,9 @@ def main():
                and (datetime.fromisoformat(now) - datetime.fromisoformat(last_read[s["name"]])).total_seconds() / 3600 < h:
                 print(f"   {s['name']}: leída hace menos de {h} h; se conservan los datos")
                 items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
+                new_ids = merge_portada(s, items, prev) if (s.get("portada") and items) else set()
                 if (s.get("fichas") or s.get("quickview")) and items:
-                    if verify_fichas(s, items, prev, now, watch0, fresh=False, check=cooldown.get(f"{s['name']}#qv", "") <= now): qv_limited.add(s["name"])
+                    if verify_fichas(s, items, prev, now, watch0, fresh=False, check=cooldown.get(f"{s['name']}#qv", "") <= now, extra_hot=new_ids): qv_limited.add(s["name"])
                 return s, items, None
             if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
                 filtered = read_filtered(s)
@@ -634,8 +667,9 @@ def main():
             if s.get("sin_stock") and items:  # no hay forma permitida de leer su stock: se muestra como 'sin verificar'
                 for p in items:
                     if p["status"] != "out": p["unverified"] = True
+            new_ids = merge_portada(s, items, prev) if (s.get("portada") and items) else set()
             if (s.get("fichas") or s.get("quickview")) and items:
-                if verify_fichas(s, items, prev, now, watch0, check=cooldown.get(f"{s['name']}#qv", "") <= now): qv_limited.add(s["name"])
+                if verify_fichas(s, items, prev, now, watch0, check=cooldown.get(f"{s['name']}#qv", "") <= now, extra_hot=new_ids): qv_limited.add(s["name"])
             return s, items, None
         except Exception as e: return s, None, e
     with ThreadPoolExecutor(max_workers=len(STORES)) as ex:  # todas las tiendas a la vez; cada una mantiene su ritmo
@@ -717,7 +751,7 @@ def main():
         lst = [p for p in lst if allowed(p)] if on else []
         return [p for p in lst if star(p)] if cfg["solo_lista_vigilancia"] else lst
     def line(p):
-        tag = " · 📦 PREORDER" if p["status"] == "preorder" else ""
+        tag = " · 📦 PREORDER" if p["status"] == "preorder" else " · agotado" if p["status"] == "out" else ""
         note = f" · {notes[p['id']]}" if p["id"] in notes else ""
         return (f"• {'⭐ ' if star(p) else ''}<a href=\"{html.escape(p['url'])}\">{html.escape(p['title'])}</a>"
                 f" — {p['price']:.2f} € ({p['store']}){tag}{note}")
