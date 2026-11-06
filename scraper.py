@@ -488,7 +488,10 @@ def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True, extra_h
     if s.get("quickview") and items and not any(ps_pid(p) is not None for p in items) and ("nopid", s["name"]) not in _DIAG:
         _DIAG.add(("nopid", s["name"])); print(f"   {s['name']}: ningún producto trae su identificador (data-id-product); sin él no se puede usar la Vista rápida")
     pool = [p for p in items if p.get("checked_at") != now]  # lo verificado en esta misma pasada no se vuelve a pedir
-    hot = [p for p in pool if (watch and matches(p["title"], watch)) or p["id"] in extra_hot][:budget]  # tu lista y lo recién llegado, primero
+    cutoff = (datetime.fromisoformat(now) - timedelta(hours=4)).isoformat(timespec="seconds")
+    def due(p):  # un vigilado que ya está en stock se vuelve a mirar solo cada 4 h; agotado, en reserva o sin verificar, en cada pasada
+        return not p.get("checked_at") or p["status"] != "stock" or p["checked_at"] < cutoff
+    hot = [p for p in pool if p["id"] in extra_hot or (watch and matches(p["title"], watch) and due(p))][:budget]  # tu lista y lo recién llegado, primero
     hot_ids = {p["id"] for p in hot}
     rest = [p for p in pool if p["id"] not in hot_ids]
     unv = [p for p in rest if not p.get("checked_at")]
