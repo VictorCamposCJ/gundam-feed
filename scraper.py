@@ -27,7 +27,7 @@ STORES = [
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 4, "pausa_qv": 95, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 16, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 12, "rev": 3},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 20, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
@@ -116,7 +116,7 @@ class RateLimited(requests.RequestException):
 class TimeBudget(requests.RequestException):
     pass
 
-def get(url, pause=1.5, headers=None, data=None, **kw):
+def get(url, pause=1.5, headers=None, data=None, json_body=None, **kw):
     if RESPECT_ROBOTS and not robots_allows(url):
         print(f"   robots.txt no permite leer: {url}")
         raise RobotsBlocked(url)
@@ -131,7 +131,8 @@ def get(url, pause=1.5, headers=None, data=None, **kw):
         over()
         time.sleep(max(pause, _PAUSE.get(host, 0)))
         try:
-            r = (requests.post(url, headers={**UA, **(headers or {})}, data=data, timeout=40, **kw) if data is not None
+            r = (requests.post(url, headers={**UA, **(headers or {})}, json=json_body, timeout=40, **kw) if json_body is not None
+                 else requests.post(url, headers={**UA, **(headers or {})}, data=data, timeout=40, **kw) if data is not None
                  else requests.get(url, headers={**UA, **(headers or {})}, timeout=40, **kw))
             if r.status_code == 429:  # la tienda pide ir más despacio: se respeta
                 if host not in _DIAG:
@@ -474,27 +475,54 @@ def merge_portada(s, items, prev):
     if fresh: print(f"   {s['name']}: {len(fresh)} productos nuevos solo en la portada")
     return fresh
 
+def odoo_stock(s, p):
+    """Odoo: estado real de un producto con la misma consulta que hace su ficha (/website_sale/get_combination_info).
+    Devuelve 'stock', 'preorder', 'out' o None si no se puede saber."""
+    m = re.search(r"-(\d+)(?:[?#].*)?$", p.get("url", ""))
+    if not m: return None
+    o = urlparse(s["base"]); origin = f"{o.scheme}://{o.netloc}"
+    body = {"id": 1, "jsonrpc": "2.0", "method": "call",
+            "params": {"product_template_id": int(m.group(1)), "product_id": False, "combination": [], "add_qty": 1}}
+    r = get(f"{origin}/website_sale/get_combination_info", pause=float(s.get("pausa", 1.5)), headers={"Content-Type": "application/json"}, json_body=body)
+    try: data = r.json()
+    except ValueError: data = None
+    res = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(res, dict) or ("free_qty" not in res and "is_storable" not in res):
+        if ("odoo", s["name"]) not in _DIAG:
+            _DIAG.add(("odoo", s["name"])); print(f"   {s['name']}: la consulta de stock no devolvió datos (respuesta: {r.text[:160]!r})")
+        return None
+    if res.get("is_storable") is False: return "stock"  # sin control de stock: siempre disponible
+    free = res.get("free_qty")
+    if not isinstance(free, (int, float)): return None
+    if free > 0: return "stock"
+    return "preorder" if res.get("allow_out_of_stock_order") else "out"
+
 def confirm_out(s, items, prev, now):
-    """Tiendas con lista 'ocultar agotados': lo que no sale en ella se da por agotado. Aquí se abre la ficha de algunos (primero los que antes
-    tenían stock y los nuevos, luego por turnos) para no dejar agotados falsos."""
+    """Tiendas con lista 'ocultar agotados': lo que no sale en ella se da por agotado, pero esa lista a veces se deja productos.
+    Aquí se consulta el stock real de algunos (primero los que antes tenían stock y los nuevos, luego por turnos)."""
     budget = int(s["confirmar_agotados"])
-    for p in items:  # conservar el turno de comprobación aunque se relea la lista completa
+    cutoff = (datetime.fromisoformat(now) - timedelta(minutes=60)).isoformat(timespec="seconds")
+    reused = 0
+    for p in items:
         o = prev.get(p["id"])
-        if o and o.get("ficha_at") and not p.get("ficha_at"): p["ficha_at"] = o["ficha_at"]
+        if o and o.get("ficha_at") and not p.get("ficha_at"): p["ficha_at"], p["ficha_st"] = o["ficha_at"], o.get("ficha_st")  # conservar el turno
+        if p["status"] == "out" and p.get("ficha_st") in ("stock", "preorder") and p.get("ficha_at", "") > cutoff:  # confirmado hace menos de 1 h
+            p["status"], p["in_stock"] = p["ficha_st"], True; reused += 1
     def prio(p):
         o = prev.get(p["id"])
         return (0 if (o is None or o.get("status") != "out") else 1, p.get("ficha_at", ""))
     cand = sorted((p for p in items if p["status"] == "out"), key=prio)[:budget]
-    checked = fixed = 0
+    checked = fixed = confirmed = 0
     for p in cand:
-        try: st = ficha_status(get(p["url"], pause=float(s.get("pausa", 1.5))).text)
+        try: st = odoo_stock(s, p)
         except (RateLimited, TimeBudget): print(f"   {s['name']}: se interrumpe la comprobación de agotados"); break
         except requests.RequestException: continue
-        p["ficha_at"] = now
         if st is None: continue
-        checked += 1
+        p["ficha_at"], p["ficha_st"] = now, st; checked += 1
         if st in ("stock", "preorder"): p["status"], p["in_stock"] = st, True; fixed += 1
-    print(f"   {s['name']}: {checked} agotados comprobados en su ficha; {fixed} estaban en stock (la lista con stock no los incluía)")
+        else: confirmed += 1
+    print(f"   {s['name']}: {checked} agotados comprobados: {confirmed} confirmados agotados, {fixed} estaban en stock (la lista con stock no los incluía)"
+          + (f"; {reused} ya confirmados en la última hora" if reused else ""))
 
 def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True, extra_hot=()):
     """El listado no indica (o no basta para saber) el stock: se consulta producto a producto, máximo s['fichas'] / s['quickview'] por pasada.
@@ -761,7 +789,7 @@ def main():
         for p in items:
             ids.add(p["id"]); old = prev.get(p["id"])
             p["first_seen"] = BASELINE if (rebase or (first_read and not old)) else (old["first_seen"] if old else now)
-            p["restocked_at"] = None if rebase else (old.get("restocked_at") if old else None)
+            p["restocked_at"] = None if (rebase or p["status"] == "out") else (old.get("restocked_at") if old else None)  # una reposición vieja deja de contar si ya está agotado
             current[p["id"]] = p
             if first_read: continue  # primera lectura (o fuente nueva) de una tienda: no avisar
             if not old: new.append(p); continue
