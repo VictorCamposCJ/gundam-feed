@@ -27,7 +27,7 @@ STORES = [
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 4, "pausa_qv": 95, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 16, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 20, "rev": 3},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 20, "precio_x": 1.21, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
@@ -216,7 +216,7 @@ def make(s, a, title, price_txt, text, img, extra_cls=""):
     url = requests.compat.urljoin(s["base"], a["href"])
     src = ""
     if img: src = img.get("data-src") or img.get("data-lazy-src") or img.get("src") or ""
-    return {"id": f"{s['name']}:{url}", "store": s["name"], "title": title, "price": to_price(price_txt),
+    return {"id": f"{s['name']}:{url}", "store": s["name"], "title": title, "price": round(to_price(price_txt) * float(s.get("precio_x", 1)), 2),
             "status": get_status(text, extra_cls), "in_stock": get_status(text, extra_cls) != "out",
             "image": requests.compat.urljoin(s["base"], src) if src and not src.startswith("data:") else "", "url": url}
 
@@ -692,7 +692,7 @@ def main():
     def cache_fresh(s):
         """True si la lista completa de esta tienda se leyó hace menos de 'completa_cada_h' horas."""
         h, info = s.get("completa_cada_h"), full_info.get(s["name"])
-        if not (h and s.get("stock_url") and info and info.get("rev") == s.get("rev", 1)): return False
+        if not (h and s.get("stock_url") and info and info.get("rev") == s.get("rev", 1) and info.get("px", 1) == s.get("precio_x", 1)): return False
         if not any(p["store"] == s["name"] for p in prev.values()): return False
         return (datetime.fromisoformat(now) - datetime.fromisoformat(info["at"])).total_seconds() / 3600 < h
 
@@ -739,7 +739,7 @@ def main():
                 if s.get("stock_url") and items:
                     if filtered is not None: apply_stock_list(s, items, filtered)
                     else: mark_unverified(items, prev); print(f"   {s['name']}: sin lista con stock; los productos se muestran como 'sin verificar'")
-                if s.get("completa_cada_h") and items: full_done[s["name"]] = {"at": now, "rev": s.get("rev", 1)}
+                if s.get("completa_cada_h") and items: full_done[s["name"]] = {"at": now, "rev": s.get("rev", 1), "px": s.get("precio_x", 1)}
             if s.get("confirmar_agotados") and s.get("stock_url") and items: confirm_out(s, items, prev, now)
             if s.get("sin_stock") and items:  # no hay forma permitida de leer su stock: se muestra como 'sin verificar'
                 for p in items:
@@ -787,7 +787,7 @@ def main():
         first_read = s["name"] not in known_stores or rebase
         ids = set()
         for p in items:
-            ids.add(p["id"]); old = prev.get(p["id"])
+            ids.add(p["id"]); old = prev.get(p["id"]); p.pop("miss", None)
             p["first_seen"] = BASELINE if (rebase or (first_read and not old)) else (old["first_seen"] if old else now)
             p["restocked_at"] = None if (rebase or p["status"] == "out") else (old.get("restocked_at") if old else None)  # una reposición vieja deja de contar si ya está agotado
             current[p["id"]] = p
@@ -800,7 +800,8 @@ def main():
                                   else "de nuevo en preorder" if p["status"] == "preorder" else "repuesto")
         for k, v in prev.items():  # desaparecidos = agotados
             if v["store"] == s["name"] and k not in ids and keep(v) and not rebase:
-                current[k] = {**v, "status": "out", "in_stock": False}
+                miss = v.get("miss", 0) + 1  # puede ser un fallo de lectura de la tienda: se espera a que falte 3 veces seguidas
+                current[k] = ({**v, "status": "out", "in_stock": False, "restocked_at": None, "miss": miss} if miss >= 3 else {**v, "miss": miss})
 
     prods = sorted(current.values(), key=lambda p: p["first_seen"], reverse=True)
     for p in prods: p["grade"] = grade(p["title"])
