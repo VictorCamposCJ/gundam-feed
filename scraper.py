@@ -27,7 +27,7 @@ STORES = [
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 4, "pausa_qv": 95, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 16, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 20, "precio_x": 1.21, "rev": 3},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 40, "precio_x": 1.21, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
@@ -801,7 +801,7 @@ def main():
         for k, v in prev.items():  # desaparecidos = agotados
             if v["store"] == s["name"] and k not in ids and keep(v) and not rebase:
                 miss = v.get("miss", 0) + 1  # puede ser un fallo de lectura de la tienda: se espera a que falte 3 veces seguidas
-                current[k] = ({**v, "status": "out", "in_stock": False, "restocked_at": None, "miss": miss} if miss >= 3 else {**v, "miss": miss})
+                current[k] = ({**v, "status": "out", "in_stock": False, "restocked_at": None, "miss": miss} if miss >= 3 else {**v, "miss": miss, **({"restocked_at": None} if v.get("status") == "out" else {})})
 
     prods = sorted(current.values(), key=lambda p: p["first_seen"], reverse=True)
     for p in prods: p["grade"] = grade(p["title"])
