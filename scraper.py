@@ -17,7 +17,8 @@ STORES = [
     {"name": "Robotines",    "base": "https://www.robotines.com",     "type": "html", "url": "https://www.robotines.com/es/35-maquetas-gundam"},
     {"name": "Lost Bunker",  "base": "https://lostbunker.com",        "type": "shopify"},
     {"name": "La Escotilla", "base": "https://laescotillajuegos.com", "type": "shopify"},
-    {"name": "Gold Saucer", "base": "https://goldsaucerstore.es", "type": "html", "buscar_url": "https://goldsaucerstore.es/index.php?controller=search&s={q}", "pausa": 3, "rev": 2},
+    # Gold Saucer: responde 403 a todas las peticiones automáticas (incluso a una sola búsqueda). Desactivada; hay un enlace en la web.
+    # {"name": "Gold Saucer", "base": "https://goldsaucerstore.es", "type": "html", "buscar_url": "https://goldsaucerstore.es/index.php?controller=search&s={q}", "pausa": 3, "rev": 2},
     {"name": "1001Hobbies",  "base": "https://www.1001hobbies.es",    "type": "html", "url": "https://www.1001hobbies.es/26736-gunpla"},
     {"name": "Pixelatoy",        "base": "https://www.pixelatoy.com",   "type": "html", "url": "https://www.pixelatoy.com/es/334-gunpla"},
     {"name": "Victoriano Yoake", "base": "https://victorianoyoake.com", "type": "shopify"},
@@ -445,6 +446,9 @@ def quickview_status(s, p):
     if href.endswith(("PreOrder", "BackOrder")) or PREORDER.search(txt): return "preorder"
     return "stock" if (href.endswith("InStock") or av is not None or btn is not None) else None
 
+def qv_key(s):
+    return f"{s['name']}#qv#{s.get('pausa_qv', '')}#{s.get('quickview', '')}"
+
 def read_portada(s):
     """Portada de la tienda: productos de Gundam destacados o recién llegados (una sola petición). Devuelve la lista, o None si falla."""
     try: r = get(s["portada"], pause=float(s.get("pausa", 1.5)))
@@ -496,8 +500,10 @@ def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True, extra_h
     checked = changed = 0; limited = False
     for p in chosen:
         try: st = fetch(p)
-        except (RateLimited, TimeBudget) as e:
-            limited = True; print(f"   {s['name']}: se interrumpe la verificación de productos ({type(e).__name__})"); break
+        except RateLimited:
+            limited = True; print(f"   {s['name']}: la tienda pide ir más despacio; se interrumpe la verificación y se pausa unas horas"); break
+        except TimeBudget:
+            print(f"   {s['name']}: se alcanzó el tiempo máximo de la tienda; la verificación sigue en la próxima pasada"); break
         except requests.RequestException: continue
         if st is None: continue
         checked += 1; changed += st != p["status"]
@@ -666,7 +672,7 @@ def main():
                 items = [dict(p) for p in prev.values() if p["store"] == s["name"]]
                 new_ids = merge_portada(s, items, prev) if (s.get("portada") and items) else set()
                 if (s.get("fichas") or s.get("quickview")) and items:
-                    if verify_fichas(s, items, prev, now, watch0, fresh=False, check=cooldown.get(f"{s['name']}#qv", "") <= now, extra_hot=new_ids): qv_limited.add(s["name"])
+                    if verify_fichas(s, items, prev, now, watch0, fresh=False, check=cooldown.get(qv_key(s), "") <= now, extra_hot=new_ids): qv_limited.add(s["name"])
                 return s, items, None
             if cache_fresh(s):  # solo se relee la lista con stock; el resto sale de la última lectura completa
                 filtered = read_filtered(s)
@@ -686,7 +692,7 @@ def main():
                     if p["status"] != "out": p["unverified"] = True
             new_ids = merge_portada(s, items, prev) if (s.get("portada") and items) else set()
             if (s.get("fichas") or s.get("quickview")) and items:
-                if verify_fichas(s, items, prev, now, watch0, check=cooldown.get(f"{s['name']}#qv", "") <= now, extra_hot=new_ids): qv_limited.add(s["name"])
+                if verify_fichas(s, items, prev, now, watch0, check=cooldown.get(qv_key(s), "") <= now, extra_hot=new_ids): qv_limited.add(s["name"])
             return s, items, None
         except Exception as e: return s, None, e
     with ThreadPoolExecutor(max_workers=len(STORES)) as ex:  # todas las tiendas a la vez; cada una mantiene su ritmo
@@ -697,8 +703,8 @@ def main():
         if err is None and items: continue
         hours = 3 if host in _LIMITED else 6 if host in _BLOCKED else 0
         if hours: cooldown[f"{s['name']}#{s.get('rev', 1)}"] = (datetime.fromisoformat(now) + timedelta(hours=hours)).isoformat(timespec="seconds")
-    for name in qv_limited:  # la tienda pidió ir más despacio durante la verificación: se para esa parte 3 h
-        cooldown[f"{name}#qv"] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
+    for st in STORES:  # la tienda pidió ir más despacio durante la verificación: se para esa parte 3 h
+        if st["name"] in qv_limited: cooldown[qv_key(st)] = (datetime.fromisoformat(now) + timedelta(hours=3)).isoformat(timespec="seconds")
     cooldown = {k: v for k, v in cooldown.items() if v > now}
 
     for s, items, err in results:
