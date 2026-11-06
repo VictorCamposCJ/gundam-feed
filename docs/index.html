@@ -42,6 +42,7 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
 .tabs{flex-basis:100%;gap:8px}
 .tab{font-size:1.1rem;padding:6px 16px}
 .empty{padding:40px 0;color:var(--mute)}
+.manual{padding:0 0 60px;color:var(--mute)}.manual h2{font:600 1.3rem "Barlow Condensed",sans-serif;color:var(--ink);margin:10px 0 6px}.manual a{color:var(--blue)}.manual li{margin:4px 0}
 </style>
 </head>
 <body>
@@ -69,6 +70,18 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--mute)}
   <div id="meta"></div>
   <div class="grid" id="grid"></div>
 </div>
+<footer class="wrap manual">
+  <h2>Tiendas que no se leen automáticamente</h2>
+  <p>Estas tiendas bloquean los accesos automáticos o no dejan ver su stock. Consúltalas a mano:</p>
+  <ul>
+    <li><a href="https://goldsaucerstore.es/60-model-kits-gundam" target="_blank" rel="noopener">Gold Saucer</a> · Model Kits Gundam</li>
+    <li><a href="https://empiregames.es" target="_blank" rel="noopener">Empire Games</a></li>
+    <li>Gunpla Loompa, solo con stock:
+      <a href="https://gunplaloompa.com/rg-1144-5/?q=Disponibilidad-En+stock" target="_blank" rel="noopener">RG</a> ·
+      <a href="https://gunplaloompa.com/GundamHG-4/?q=Disponibilidad-En+stock" target="_blank" rel="noopener">HG</a> ·
+      <a href="https://gunplaloompa.com/gunplaMG-10/?q=Disponibilidad-En+stock" target="_blank" rel="noopener">MG</a></li>
+  </ul>
+</footer>
 <script>
 const $ = id => document.getElementById(id);
 let all = [], gradeSel = new Set(), tab = 'all';
