@@ -27,7 +27,7 @@ STORES = [
     {"name": "Geosan Battle", "base": "https://geosanbattle.com", "type": "woo", "url": "https://geosanbattle.com/?s=gundam&post_type=product&dgwt_wcas=1&e-page-c069240=1", "fallback": "https://geosanbattle.com/categoria-producto/gundam/", "paginar": "param:e-page-c069240", "solo_gundam": True, "rev": 4},
     {"name": "Gunpla Loompa", "base": "https://gunplaloompa.com", "type": "html", "urls": ["https://gunplaloompa.com/rg-1144-5/", "https://gunplaloompa.com/GundamHG-4/", "https://gunplaloompa.com/gunplaMG-10/"], "portada": "https://gunplaloompa.com/", "ps_json": True, "paginar": "param:page", "quickview": 4, "pausa_qv": 95, "intervalo_h": 2, "pausa": 3, "max_paginas": 80, "max_minutos": 16, "rev": 10},
     {"name": "Gunpla.es", "base": "https://gunpla.es", "type": "html", "url": "https://gunpla.es/en/shop?category=&search=gundam&order=name+asc", "rev": 2},
-    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "rev": 3},
+    {"name": "Mecha Universe", "base": "https://www.mechauniverse.com/es", "type": "html", "url": "https://www.mechauniverse.com/es/gunpla-1411", "stock_url": "https://www.mechauniverse.com/es/gunpla-1411?out_of_stock=1", "completa_cada_h": 6, "confirmar_agotados": 12, "rev": 3},
     {"name": "La Cueva Roja", "base": "https://lacuevaroja.com", "type": "html", "url": "https://lacuevaroja.com/bandai", "solo_gundam": True},
     # Empire Games devuelve 403 a los accesos automáticos (bloqueo de la tienda): desactivada.
     # {"name": "Empire Games", "base": "https://empiregames.es", "type": "auto"},
@@ -474,6 +474,28 @@ def merge_portada(s, items, prev):
     if fresh: print(f"   {s['name']}: {len(fresh)} productos nuevos solo en la portada")
     return fresh
 
+def confirm_out(s, items, prev, now):
+    """Tiendas con lista 'ocultar agotados': lo que no sale en ella se da por agotado. Aquí se abre la ficha de algunos (primero los que antes
+    tenían stock y los nuevos, luego por turnos) para no dejar agotados falsos."""
+    budget = int(s["confirmar_agotados"])
+    for p in items:  # conservar el turno de comprobación aunque se relea la lista completa
+        o = prev.get(p["id"])
+        if o and o.get("ficha_at") and not p.get("ficha_at"): p["ficha_at"] = o["ficha_at"]
+    def prio(p):
+        o = prev.get(p["id"])
+        return (0 if (o is None or o.get("status") != "out") else 1, p.get("ficha_at", ""))
+    cand = sorted((p for p in items if p["status"] == "out"), key=prio)[:budget]
+    checked = fixed = 0
+    for p in cand:
+        try: st = ficha_status(get(p["url"], pause=float(s.get("pausa", 1.5))).text)
+        except (RateLimited, TimeBudget): print(f"   {s['name']}: se interrumpe la comprobación de agotados"); break
+        except requests.RequestException: continue
+        p["ficha_at"] = now
+        if st is None: continue
+        checked += 1
+        if st in ("stock", "preorder"): p["status"], p["in_stock"] = st, True; fixed += 1
+    print(f"   {s['name']}: {checked} agotados comprobados en su ficha; {fixed} estaban en stock (la lista con stock no los incluía)")
+
 def verify_fichas(s, items, prev, now, watch=(), fresh=True, check=True, extra_hot=()):
     """El listado no indica (o no basta para saber) el stock: se consulta producto a producto, máximo s['fichas'] / s['quickview'] por pasada.
     Prioridad: tu lista de vigilancia -> sin verificar -> agotados (por si se reponen) -> el resto, de la comprobación más antigua a la más reciente.
@@ -690,6 +712,7 @@ def main():
                     if filtered is not None: apply_stock_list(s, items, filtered)
                     else: mark_unverified(items, prev); print(f"   {s['name']}: sin lista con stock; los productos se muestran como 'sin verificar'")
                 if s.get("completa_cada_h") and items: full_done[s["name"]] = {"at": now, "rev": s.get("rev", 1)}
+            if s.get("confirmar_agotados") and s.get("stock_url") and items: confirm_out(s, items, prev, now)
             if s.get("sin_stock") and items:  # no hay forma permitida de leer su stock: se muestra como 'sin verificar'
                 for p in items:
                     if p["status"] != "out": p["unverified"] = True
